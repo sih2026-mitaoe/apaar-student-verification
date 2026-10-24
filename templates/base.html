@@ -19,7 +19,12 @@
  <a class="nav-link {% if request.endpoint=='apaar_api.review_queue' %}active{% endif %}" href="{{ url_for('apaar_api.review_queue') }}"><span>Review queue</span></a>
  <a class="nav-link {% if request.endpoint=='dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"> <span>Overview</span></a>
  <a class="nav-link {% if request.endpoint in ['students','student_form','student_detail'] %}active{% endif %}" href="{{ url_for('students') }}"> <span>Students</span></a>
- <a class="nav-link {% if request.endpoint in ['admissions_workspace','programme_create','intake_create','enrolment_create','enrolment_detail'] %}active{% endif %}" href="{{ url_for('admissions_workspace') }}"><span>Admissions &amp; intake</span></a>
+ <a class="nav-link {% if request.endpoint in ['admissions_workspace','programme_create','intake_create','enrolment_create','enrolment_detail','admissions_submission_register','admissions_monitoring','approved_intake_create'] %}active{% endif %}" href="{{ url_for('admissions_workspace') }}"><span>Admissions &amp; intake</span></a>
+ <a class="nav-link {% if request.endpoint=='admissions_monitoring' %}active{% endif %}" href="{{ url_for('admissions_monitoring') }}"><span>Admissions monitoring</span></a>
+ {% if session.get('role') != 'platform_admin' %}<a class="nav-link {% if request.endpoint=='central_submission_workspace' %}active{% endif %}" href="{{ url_for('central_submission_workspace') }}"><span>Central submissions</span></a>{% endif %}
+ {% if session.get('role') == 'platform_admin' %}<a class="nav-link {% if request.endpoint=='central_oversight_dashboard' %}active{% endif %}" href="{{ url_for('central_oversight_dashboard') }}"><span>Central oversight</span></a>{% endif %}
+ {% if session.get('role') == 'platform_admin' %}<a class="nav-link {% if request.endpoint=='central_institutions' %}active{% endif %}" href="{{ url_for('central_institutions') }}"><span>Institution registry</span></a>{% endif %}
+ {% if config.get('ENABLE_SHARED_DEMO_RECONCILIATION') %}<a class="nav-link {% if request.endpoint=='identity_reconciliation_page' %}active{% endif %}" href="{{ url_for('identity_reconciliation_page') }}"><span>Identity reconciliation (demo)</span></a>{% endif %}
  <a class="nav-link {% if request.endpoint=='imports' %}active{% endif %}" href="{{ url_for('imports') }}"> <span>Import records</span></a>
  {% if session.get('role') in ['admin','institution_admin','operator'] %}<a class="nav-link {% if request.endpoint=='source_datasets' %}active{% endif %}" href="{{ url_for('source_datasets') }}"><span>Institution source data</span></a>{% endif %}
  <a class="nav-link {% if request.endpoint=='audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}"> <span>Audit history</span></a>

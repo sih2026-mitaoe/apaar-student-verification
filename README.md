@@ -22,9 +22,30 @@ python app.py
 
 Before the first launch, edit `.env` and replace the `SECRET_KEY` and `DEMO_ADMIN_PASSWORD` placeholders with private values. The app now treats every `replace-with-` secret as a placeholder; never keep one in production. Set `APP_ENV=production` for production-mode secret validation. Use a unique password of at least 16 characters. The first database initialization creates the `admin` account using that password; later launches do not reset an existing account. If the account needs to be created or reset explicitly, use `bootstrap_admin.py`, which prompts for credentials without echoing the password and requires `--update-existing` before resetting a matching account.
 
-Open <http://127.0.0.1:5000>. Set `COOKIE_SECURE=1` when serving through HTTPS. `run.cmd` is also available for setup and launch. Do not expose Flask's development server to the public internet.
+Open <http://127.0.0.1:5000>. Production mode forces secure session cookies; set `COOKIE_SECURE=1` when serving a non-production instance through HTTPS. `run.cmd` is also available for setup and launch. Do not expose Flask's development server to the public internet.
 
 See [Phase 1 security and correctness changes](docs/PHASE1_SECURITY_FIXES.md) for the latest implementation log and validation status.
+
+See [Phase 2 upgrade log](docs/PHASE2_UPGRADE_LOG.md) for cross-institution identity candidate review, intake utilization visibility, limitations, and validation status. The new reconciliation view is a local synthetic-data feature and is not official APAAR verification.
+
+See [Phase 3 completion audit](docs/PHASE3_COMPLETION_AUDIT.md) for the feature-by-feature gap assessment against the agreed SIH requirements. It records what is implemented, what remains partial or missing, and which checks are still unverified.
+
+See [Phase 4 upgrade log](docs/PHASE4_UPGRADE_LOG.md) for the additive central submission workflow, platform oversight role, snapshot integrity checks, limitations, and validation status.
+
+### Central demo workflow
+
+Institution administrators/operators can open **Central submissions** after at least one admissions enrolment has been submitted for review. They can create a versioned synthetic batch from eligible records for an academic year. A dedicated `platform_admin` account can inspect batches and record controlled review transitions in **Central oversight**.
+
+To provision a separate central demo reviewer, first initialize the database and configure SMTP/email delivery for OTP sign-in, then run:
+
+```powershell
+python bootstrap_platform_admin.py
+```
+
+The script prompts for a unique username, email and password (minimum 16 characters). It does not modify an existing account. This role is for local synthetic prototype oversight only; it does not grant official AICTE authority.
+
+The central batch is an internal demo snapshot, not an external submission. It excludes APAAR-like identifiers and email, and its SHA-256 digest is an integrity check only—not a signature. Institution-configured capacity flags are preliminary and are not approved-intake findings. Use synthetic data only.
+
 
 ## Database and backup
 
@@ -83,7 +104,7 @@ The test suite runs with `python -m pytest -q` and covers Flask login, CSRF, log
 - Website validation history and API cases now use canonical `workflow_cases`, a shared transition service, case timeline, and API/UI. Legacy validation outcomes are preserved as `legacy-web:<id>` and mapped to `open` or informational `recorded` states; migration details are in `docs/CASE_MIGRATION_MAPPING.md`.
 - Import preview, row validation, error reports, history, repeated-file protection, and an atomic confirmation transaction are implemented. Import retention/deletion and richer column mapping are not.
 - Student archive is soft-delete. Institution administrators can restore records; conflicting institutional IDs require a replacement value, while the internal student ID and history are retained. There is no automated purge or retention schedule; archived rows remain in SQLite unless an authorized, separately planned retention process is introduced.
-- The `apaar-platform-upgrade/` React/Express workspace is preserved as disconnected prototype source. Its screens use hardcoded/in-memory state, mock users and audit entries, and no shared auth or database. It is not part of the canonical startup path. Its web typecheck and production build pass; its API build passes, but its API tests cannot collect because the installed Express dependency tree is missing `encodeurl`. A clean npm install reported six dependency vulnerabilities.
+- This Phase 6 distribution contains the canonical Flask/Jinja application and does not include a separate React/Express prototype workspace. Run the app with `python app.py` from the repository root; the Flask application and SQLite database described above are the supported local demonstration path.
 - Duplicate detection uses exact or thresholded normalized-name similarity plus email/course signals, records explanations, and requires a reviewer decision and reason. Tune `DUPLICATE_NAME_SIMILARITY` (default `0.88`). The schema has no date-of-birth field and there is no automatic merge. Evidence metadata is synthetic and non-file based; evidence file uploads are not implemented.
 - The student directory has search, status filtering, and 50-row pagination. Dashboard metrics use institution-scoped database counts; import failures are not counted because failed import jobs are not persisted as a distinct status.
 - SQLite is suitable for the local synthetic demo, not a multi-worker production deployment. The demo has no official provider integration and is not production-ready.
@@ -110,3 +131,48 @@ The student profile now includes a purpose-limited internal authorization regist
 ### Current audit caveat
 
 The current source has passed Python syntax compilation, but this environment does not have Flask/Werkzeug and cannot reach the package index. Consequently, no claim is made that the full Flask integration suite passes in this build. See `docs/ENGINEERING_STATUS.md` for the precise validation boundary and outstanding work.
+
+
+See [Phase 2 upgrade log](docs/PHASE2_UPGRADE_LOG.md) for implemented changes, validation status, and limitations.
+
+
+
+## Phase 5 — institution registry and service submission API
+
+Phase 5 adds a platform-admin-managed **prototype institution registry** at `/central-institutions`. A platform administrator can register institutions, suspend/reactivate them, issue service credentials, and revoke credentials. Raw service tokens are shown only at issuance and are stored only as SHA-256 digests; store issued tokens in a secret manager and never commit them to source control.
+
+The versioned service endpoint is `POST /api/v1/institution-submissions`. It requires:
+- `Authorization: Bearer <service-token>`
+- `Idempotency-Key: <unique key>` (8–128 characters)
+- JSON containing `academic_year` and `records` (1–5,000 records)
+
+Each record must include `institutional_enrolment_id`, `institution_student_id`, `student_name`, `programme_code`, `programme_name`, and `enrolment_status`. Optional `student_category` (`domestic`, `nri`, `oci`, `foreign_national`, `unknown`) and `seat_type` (`regular`, `supernumerary`) fields are available for monitoring; omitted values default to `unknown` and `regular`. These fields do not determine eligibility or encode category-specific seat-allocation rules. The API binds the batch to the institution associated with the credential; clients cannot choose another institution. Reusing an idempotency key with the same payload returns the original batch, while a different payload with that key returns HTTP 409. Identical content submitted with a new key is also rejected. Suspended institutions and revoked credentials cannot submit.
+
+Example request body:
+
+```json
+{
+  "academic_year": 2026,
+  "records": [
+    {
+      "institutional_enrolment_id": "ENR-001",
+      "institution_student_id": "STU-001",
+      "student_name": "Synthetic Student",
+      "programme_code": "CSE",
+      "programme_name": "Computer Science",
+      "enrolment_status": "submitted"
+    }
+  ]
+}
+```
+
+Use the actual credential in the Authorization header and a fresh Idempotency-Key for each distinct submission. The payload deliberately excludes APAAR IDs, email addresses, dates of birth, Aadhaar numbers and raw identity documents.
+
+**Important limitations:** the registry is not connected to an official institution directory and does not establish accreditation. The API is a prototype and has not been independently penetration-tested or load-tested. It has no external credential vault, rate limiter, background job queue, signed request payload, or official AICTE/APAAR/ABC/DigiLocker connection. The current SQLite storage and demo deployment are not a production hosting recommendation. Deploy behind HTTPS, keep credentials in managed secrets, rotate/revoke exposed tokens, and complete privacy/security review before using real student data. Official validation of intake references, authoritative supernumerary/category allocation rules, and external verification remain future work. Phase 6 provides only a transparent, institution-entered monitoring foundation.
+
+See `docs/PHASE5_UPGRADE_LOG.md` for changes and validation status.
+
+## Phase 6 — explainable admissions monitoring
+
+Phase 6 adds versioned institution-entered approved-intake references, explicit student-category and seat-type classifications, and an institution-scoped **Admissions monitoring** page. The view separates approved counts from pending workflow records and flags missing intake references, intake excess, supernumerary-limit excess and missing category information. NRI, OCI and foreign-national counts are reported separately; the app does not invent category-specific seat-allocation rules. All reference values remain unverified until checked against the underlying authoritative source. These are operational review signals, not regulatory findings. See [Phase 6 admissions monitoring notes](docs/PHASE6_ADMISSIONS_MONITORING.md).
+

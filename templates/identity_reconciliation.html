@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Cross-institution reconciliation{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><span class="eyebrow">IDENTITY DATA QUALITY</span><h1>Cross-institution reconciliation</h1>
+    <p>Review possible identifier reuse across institutional records. Findings are candidates, not identity verdicts.</p></div>
+</div>
+<div class="notice info"><strong>Privacy and verification boundary</strong>
+  <p>Matching uses exact normalized identifiers already recorded in this local demo database. Other institutions' names, emails, notes, and full student identifiers are not displayed. This is not an official APAAR/ABC/DigiLocker verification.</p>
+</div>
+<div class="metric-grid">
+  <div class="stat-card"><span class="stat-top">Candidates for this institution</span><strong>{{ candidates|length }}</strong><small>Human review required</small></div>
+  <div class="stat-card"><span class="stat-top">Identifier / name conflict</span><strong>{{ candidates|selectattr('name_match', 'equalto', false)|list|length }}</strong><small>Prioritize these records</small></div>
+  <div class="stat-card"><span class="stat-top">Ruleset</span><strong style="font-size:1rem">{{ ruleset_version }}</strong><small>Deterministic, explainable rules</small></div>
+</div>
+<div class="panel">
+  <div class="panel-heading"><div><h2>Candidate matches</h2><p>Only records belonging to your institution are listed as local records.</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>Your student</th><th>Other institution</th><th>Other student ID</th><th>Signal</th><th>Why flagged</th></tr></thead><tbody>
+  {% for item in candidates %}<tr>
+    <td><strong>{{ item.local_name }}</strong><small class="muted">{{ item.local_institution_student_id }}</small></td>
+    <td>{{ item.other_institution }}</td><td>{{ item.other_student_id_masked }}</td>
+    <td><span class="status-pill">{{ item.signal|replace('_',' ')|title }}</span></td><td>{{ item.explanation }}</td>
+  </tr>{% else %}<tr><td colspan="5">No cross-institution identifier matches were found for the current institution. This does not prove that records are unique.</td></tr>{% endfor %}
+  </tbody></table></div>
+</div>
+{% endblock %}

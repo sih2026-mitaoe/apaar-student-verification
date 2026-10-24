@@ -6,3 +6,17 @@
 .audit-filter{display:flex;align-items:end;gap:10px;padding:16px 18px;border-bottom:1px solid var(--line)}.audit-filter label{display:grid;gap:6px;color:#58667b;font-size:10px;font-weight:700}.audit-filter input{width:min(260px,28vw);border:1px solid #dfe5ee;border-radius:8px;padding:10px;font-size:11px}@media(max-width:650px){.audit-filter{align-items:stretch;flex-direction:column}.audit-filter input{width:100%}}
 
 .quality-panel{margin:12px 20px 0;padding:13px;border:1px solid var(--line);border-radius:10px;background:#fcfdff}.quality-heading{display:flex;align-items:center;justify-content:space-between}.quality-heading h3{font:700 12px Manrope;margin:0}.quality-panel>p{font-size:11px}.quality-panel ul{list-style:none;padding:0;margin:8px 0 0}.quality-panel li{display:grid;gap:4px;padding:9px 0;border-top:1px solid #edf0f5}.quality-panel li strong{font-size:11px}.quality-panel li small{font-size:10px;color:#78859a}.quality-code{font:10px ui-monospace,Consolas,monospace;color:#67748a}.quality-error strong{color:var(--red)}.quality-warning strong{color:var(--amber)}.quality-info strong{color:#536178}.dashboard-work-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.task-list{display:grid;gap:8px;padding:0 18px 18px}.task-link{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1px solid var(--line);border-radius:9px;padding:11px 12px;font-size:11px;font-weight:700}.task-link:hover{border-color:#bdccf5;background:#fafcff}.task-link strong{font:800 18px Manrope;color:var(--blue)}.task-empty{padding:0 20px 18px;color:var(--muted);font-size:11px}.age-bands{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 18px}.age-band{flex:1;min-width:100px;background:#f7f9fc;border:1px solid var(--line);border-radius:8px;padding:10px}.age-band strong,.age-band span{display:block}.age-band strong{font:700 16px Manrope}.age-band span{font-size:10px;color:var(--muted)}@media(max-width:760px){.dashboard-work-grid{grid-template-columns:1fr}}
+
+
+/* Central submission workflow additions */
+.status-pill { display:inline-flex; align-items:center; border:1px solid var(--line, #d8e0e8); border-radius:999px; padding:4px 9px; font-size:.75rem; font-weight:700; text-transform:capitalize; }
+.status-pill.danger, .danger-text { color:#a12622; border-color:#e5b8b6; }
+.status-pill.warning { color:#8a5a00; border-color:#e7c879; }
+.form-row { display:flex; align-items:end; flex-wrap:wrap; gap:14px; }
+.form-row label { min-width:220px; display:flex; flex-direction:column; gap:6px; }
+.form-row select, .stack-form select, .stack-form textarea { border:1px solid var(--line, #d8e0e8); border-radius:8px; padding:10px; font:inherit; background:white; color:inherit; }
+.stack-form { display:grid; gap:14px; max-width:650px; }
+.stack-form label { display:grid; gap:6px; }
+.hash { overflow-wrap:anywhere; white-space:normal; }
+.notice.warning { background:#fff8e8; border-color:#ecd7a4; color:#604b1e; }
+@media (max-width: 700px) { .form-row { align-items:stretch; flex-direction:column; } .form-row label { min-width:0; } }

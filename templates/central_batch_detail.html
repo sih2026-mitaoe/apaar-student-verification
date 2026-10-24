@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Review central batch{% endblock %}
+{% block content %}
+<section class="page-heading"><div><span class="eyebrow">CENTRAL REVIEW</span><h1>Submission batch</h1><p>Reference <code>{{ batch.id }}</code> · {{ batch.institution }} · version {{ batch.version }}</p></div></section>
+<div class="notice warning"><strong>Demo only:</strong> this snapshot is not an official AICTE submission. A matching SHA-256 digest detects content changes; it is not a digital signature or proof of truth.</div>
+<section class="panel">
+<div class="stats-grid"><article class="stat-card"><span>Status</span><strong>{{ batch.status|replace('_',' ')|title }}</strong></article><article class="stat-card"><span>Records</span><strong>{{ batch.record_count }}</strong></article><article class="stat-card"><span>Preliminary flags</span><strong>{{ batch.flagged_count }}</strong></article><article class="stat-card"><span>Snapshot integrity</span><strong>{{ 'Pass' if integrity_ok else 'Fail' }}</strong></article></div>
+<p><strong>Academic year:</strong> {{ batch.academic_year }}–{{ batch.academic_year + 1 }} · <strong>Submitted by:</strong> {{ batch.submitted_by }} · <strong>Submitted:</strong> {{ batch.submitted_at }}</p>
+<p><strong>SHA-256:</strong> <code class="hash">{{ batch.content_hash }}</code></p>
+{% if batch.review_note %}<p><strong>Latest review note:</strong> {{ batch.review_note }}</p>{% endif %}
+</section>
+<section class="panel"><h2>Review action</h2>
+{% if transitions and integrity_ok %}
+<form method="post" class="stack-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="status">Next state<select id="status" name="status" required>{% for state in transitions %}<option value="{{ state }}">{{ state|replace('_',' ')|title }}</option>{% endfor %}</select></label>
+<label for="review_note">Reason / decision note<textarea id="review_note" name="review_note" rows="3" maxlength="1000" placeholder="Required for review or correction requests"></textarea></label>
+<button class="btn primary" type="submit">Record review decision</button></form>
+{% elif not integrity_ok %}<p class="danger-text">The snapshot digest does not match. This batch is read-only.</p>
+{% else %}<p>This batch has no permitted outgoing transitions.</p>{% endif %}
+</section>
+<section class="panel"><h2>Submitted records</h2><p>Only minimum necessary fields are included. No APAAR-like identifier or email is in this central batch snapshot.</p>
+{% if snapshot.records %}<div class="table-wrap"><table><thead><tr><th>Institutional enrolment ID</th><th>Student reference</th><th>Student name</th><th>Programme</th><th>Academic year</th><th>Student category</th><th>Seat type</th><th>Preliminary flags</th></tr></thead><tbody>
+{% for record in snapshot.records %}<tr><td>{{ record.institutional_enrolment_id }}</td><td>{{ record.institution_student_id }}</td><td>{{ record.student_name }}</td><td>{{ record.programme_code }} — {{ record.programme_name }}</td><td>{{ record.academic_year }}</td><td>{{ record.student_category|default('unknown')|replace('_',' ')|title }}</td><td>{{ record.seat_type|default('regular')|replace('_',' ')|title }}</td><td>{% if record.preliminary_flags %}{{ record.preliminary_flags|join(', ') }}{% else %}None{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p>No readable snapshot records.</p>{% endif %}
+</section>
+<section class="panel"><h2>Event history</h2>{% if events %}<ol class="timeline">{% for event in events %}<li><strong>{{ event.event_type|replace('_',' ')|title }}</strong> — {{ event.from_status or '—' }} → {{ event.to_status or '—' }}<br><small>{{ event.created_at }} · {{ event.actor }}</small>{% if event.note %}<p>{{ event.note }}</p>{% endif %}</li>{% endfor %}</ol>{% else %}<p>No events recorded.</p>{% endif %}</section>
+{% endblock %}
