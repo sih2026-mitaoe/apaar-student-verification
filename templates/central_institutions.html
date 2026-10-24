@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Institution registry{% endblock %}
+{% block content %}
+<section class="page-heading"><div><span class="eyebrow">PLATFORM ADMINISTRATION</span><h1>Institution registry</h1><p>Onboard institutions, suspend access, and manage service credentials for the prototype submission API.</p></div></section>
+<div class="notice warning"><strong>Prototype boundary:</strong> registry entries are not verified against an official institutional directory. API credentials authenticate this demo integration only; they do not prove institutional accreditation or authorize official APAAR/AICTE access.</div>
+{% if revealed_token %}
+<section class="panel">
+<h2>New service credential — shown once</h2>
+<p>Institution: <strong>{{ revealed_token.institution_name }}</strong>. Copy this token now and store it in the institution's secret manager. It cannot be retrieved later.</p>
+<label for="new-token">Bearer token</label><textarea id="new-token" rows="3" readonly>{{ revealed_token.token }}</textarea>
+<p><strong>Never commit this token to GitHub, source code, a CSV, or a public demo.</strong> Revoke it immediately if exposed.</p>
+</section>
+{% endif %}
+<section class="panel">
+<h2>Register an institution</h2>
+<form method="post" class="stack-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="create">
+<div class="form-grid">
+<label for="institution_code">Institution code <input id="institution_code" name="institution_code" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,31}" placeholder="CAMPUS_001"></label>
+<label for="institution_name">Institution name <input id="institution_name" name="institution_name" required maxlength="160" placeholder="Synthetic Campus A"></label>
+</div>
+<button class="btn primary" type="submit">Register institution</button>
+</form>
+</section>
+<section class="panel">
+<h2>Registered institutions</h2>
+{% if institutions %}
+<div class="table-wrap"><table><thead><tr><th>Code</th><th>Institution</th><th>Status</th><th>Active credentials</th><th>Last API use</th><th>Actions</th></tr></thead><tbody>
+{% for institution in institutions %}
+<tr><td><code>{{ institution.institution_code }}</code></td><td>{{ institution.institution_name }}</td><td><span class="status-pill">{{ institution.status|title }}</span></td><td>{{ institution.active_credentials }}</td><td>{{ institution.last_api_use or 'Never' }}</td><td>
+<form method="post" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="status"><input type="hidden" name="institution_id" value="{{ institution.id }}">
+<input type="hidden" name="status" value="{{ 'suspended' if institution.status == 'active' else 'active' }}"><button class="btn secondary" type="submit">{{ 'Suspend' if institution.status == 'active' else 'Reactivate' }}</button></form>
+{% if institution.status == 'active' %}<form method="post" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="issue_credential"><input type="hidden" name="institution_id" value="{{ institution.id }}"><button class="btn primary" type="submit">Issue credential</button></form>{% endif %}
+</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% else %}<p>No institutions registered yet.</p>{% endif %}
+</section>
+<section class="panel">
+<h2>Service credentials</h2><p>Only the token prefix is stored for display. Raw tokens are not stored and cannot be recovered.</p>
+{% if credentials %}<div class="table-wrap"><table><thead><tr><th>Institution</th><th>Token prefix</th><th>Created</th><th>Last used</th><th>State</th><th>Action</th></tr></thead><tbody>
+{% for credential in credentials %}<tr><td>{{ credential.institution_name }} <small>({{ credential.institution_code }})</small></td><td><code>{{ credential.token_prefix }}…</code></td><td>{{ credential.created_at }}</td><td>{{ credential.last_used_at or 'Never' }}</td><td>{{ 'Revoked' if credential.revoked_at else 'Active' }}</td><td>{% if not credential.revoked_at %}<form method="post" action="{{ url_for('revoke_institution_credential', credential_id=credential.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn secondary" type="submit">Revoke</button></form>{% else %}—{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p>No service credentials issued.</p>{% endif %}
+</section>
+<section class="panel">
+<h2>API contract — v1</h2>
+<p><code>POST /api/v1/institution-submissions</code></p>
+<p>Send a JSON body with <code>academic_year</code> and a <code>records</code> array. Each record requires <code>institutional_enrolment_id</code>, <code>institution_student_id</code>, <code>student_name</code>, <code>programme_code</code>, <code>programme_name</code>, and <code>enrolment_status</code>. Optional <code>student_category</code> (<code>domestic</code>, <code>nri</code>, <code>oci</code>, <code>foreign_national</code>, <code>unknown</code>) and <code>seat_type</code> (<code>regular</code>, <code>supernumerary</code>) fields support monitoring only; they default to unknown/regular and do not apply regulatory allocation rules. Use an <code>Authorization: Bearer …</code> header and a unique <code>Idempotency-Key</code> header. Maximum 5,000 records per request.</p>
+<p>Repeated requests with the same key and same content return the original batch. Reusing a key with different content returns a conflict. Identical content under a new key is also rejected. This is an integration prototype, not an official endpoint.</p>
+</section>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Central oversight{% endblock %}
+{% block content %}
+<section class="page-heading"><div><span class="eyebrow">PLATFORM ADMINISTRATION</span><h1>Central oversight</h1>
+<p>Cross-institution view of synthetic demo submission batches. This is not a live AICTE repository.</p></div></section>
+<div class="notice warning"><strong>Authority limitation:</strong> all submissions shown here are local prototype batches. Capacity flags are preliminary signals based on institution-configured values, not regulatory findings.</div>
+<div class="stats-grid">
+  <article class="stat-card"><span>Total batches</span><strong>{{ totals.batch_count or 0 }}</strong></article>
+  <article class="stat-card"><span>Records in batches</span><strong>{{ totals.record_count or 0 }}</strong></article>
+  <article class="stat-card"><span>Open workflow items</span><strong>{{ totals.open_count or 0 }}</strong></article>
+  <article class="stat-card"><span>Preliminary capacity flags</span><strong>{{ totals.flagged_count or 0 }}</strong></article>
+</div>
+<section class="panel"><h2>Institution summary</h2>
+{% if institutions %}<div class="table-wrap"><table><thead><tr><th>Institution</th><th>Batches</th><th>Records</th><th>Preliminary flags</th><th>Last submission</th></tr></thead><tbody>
+{% for inst in institutions %}<tr><td>{{ inst.institution }}</td><td>{{ inst.batch_count }}</td><td>{{ inst.records or 0 }}</td><td>{{ inst.flagged or 0 }}</td><td>{{ inst.last_submission }}</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p>No institution batches received yet.</p>{% endif %}
+</section>
+<section class="panel"><h2>Central submission queue</h2>
+{% if batches %}<div class="table-wrap"><table><thead><tr><th>Institution / batch</th><th>Year</th><th>Status</th><th>Records</th><th>Flags</th><th>Submitted</th><th>Integrity</th><th>Review</th></tr></thead><tbody>
+{% for batch in batches %}<tr><td>{{ batch.institution }}<br><code>{{ batch.id }}</code><br><small>v{{ batch.version }}</small></td><td>{{ batch.academic_year }}–{{ batch.academic_year + 1 }}</td><td>{{ batch.status|replace('_',' ')|title }}</td><td>{{ batch.record_count }}</td><td>{{ batch.flagged_count }}</td><td>{{ batch.submitted_at }}</td><td>{% if batch.integrity_ok %}Digest matches{% else %}<strong>FAILED</strong>{% endif %}</td><td><a href="{{ url_for('central_batch_detail', batch_id=batch.id) }}">Open review</a></td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p>No submissions in the central demo queue.</p>{% endif %}
+</section>
+{% endblock %}

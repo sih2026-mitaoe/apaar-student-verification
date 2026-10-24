@@ -108,3 +108,27 @@ footer { color: #536878; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Phase 2: compact, accessible intake utilization and reconciliation surfaces. */
+.utilization-track { width: min(150px, 100%); height: 7px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: #e2e9eb; }
+.utilization-track span { display: block; height: 100%; border-radius: inherit; background: #087e83; }
+.stat-card small { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .utilization-track { width: 95px; }
+  .table-wrap table { min-width: 640px; }
+  .page-heading p { max-width: 68ch; }
+}
+
+
+/* Central submission workflow additions */
+.status-pill { display:inline-flex; align-items:center; border:1px solid var(--line, #d8e0e8); border-radius:999px; padding:4px 9px; font-size:.75rem; font-weight:700; text-transform:capitalize; }
+.status-pill.danger, .danger-text { color:#a12622; border-color:#e5b8b6; }
+.status-pill.warning { color:#8a5a00; border-color:#e7c879; }
+.form-row { display:flex; align-items:end; flex-wrap:wrap; gap:14px; }
+.form-row label { min-width:220px; display:flex; flex-direction:column; gap:6px; }
+.form-row select, .stack-form select, .stack-form textarea { border:1px solid var(--line, #d8e0e8); border-radius:8px; padding:10px; font:inherit; background:white; color:inherit; }
+.stack-form { display:grid; gap:14px; max-width:650px; }
+.stack-form label { display:grid; gap:6px; }
+.hash { overflow-wrap:anywhere; white-space:normal; }
+.notice.warning { background:#fff8e8; border-color:#ecd7a4; color:#604b1e; }
+@media (max-width: 700px) { .form-row { align-items:stretch; flex-direction:column; } .form-row label { min-width:0; } }

@@ -25,6 +25,7 @@ from backend.source_data import (parse_source_csv, compare_student, encode_previ
                                  version_diff, MAX_SOURCE_BYTES,
                                  SOURCE_COMPARISON_RULESET_VERSION)
 from backend.verification import provider_configuration
+from backend.identity_reconciliation import reconcile_records, RULESET_VERSION as IDENTITY_RECONCILIATION_RULESET_VERSION
 
 try:
     from dotenv import load_dotenv
@@ -66,10 +67,19 @@ production_mode = (
 )
 app.secret_key = resolve_secret_key(os.environ.get("SECRET_KEY", ""), production=production_mode)
 app.config["APAAR_DB_PATH"] = DB_PATH
+# Shared-database cross-institution matching is a demo-only capability. It is
+# opt-in and never enabled in production mode.
+app.config["ENABLE_SHARED_DEMO_RECONCILIATION"] = (
+    not production_mode and os.environ.get("ENABLE_SHARED_DEMO_RECONCILIATION", "0").strip() == "1"
+)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
+    # Secure cookies are mandatory in production regardless of a stale or
+    # accidentally unset COOKIE_SECURE environment variable.
+    SESSION_COOKIE_SECURE=(
+        production_mode or os.environ.get("COOKIE_SECURE", "0").strip() == "1"
+    ),
     PERMANENT_SESSION_LIFETIME=8 * 60 * 60,
 )
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
@@ -84,6 +94,10 @@ def protect_cookie_authenticated_posts():
     if "_csrf_token" not in session:
         session["_csrf_token"] = secrets.token_urlsafe(32)
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    # Machine API requests are authenticated independently with scoped bearer
+    # credentials; browser/session routes remain protected by CSRF.
+    if request.path == "/api/v1/institution-submissions":
         return None
     supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token", "")
     expected = session.get("_csrf_token", "")
@@ -102,7 +116,7 @@ def backup_before_schema_upgrade():
         )}
         if not tables:
             return
-        required_tables = {"users", "audit_logs", "workflow_cases", "duplicate_candidates", "audit_events", "import_jobs", "import_job_rows", "case_events", "case_evidence", "verification_runs", "verification_rule_results", "app_migrations", "institution_source_datasets", "institution_source_uploads", "institution_source_records", "institution_source_comparisons", "programmes", "intake_allocations", "enrolments", "enrolment_submissions", "data_use_authorizations"}
+        required_tables = {"users", "audit_logs", "workflow_cases", "duplicate_candidates", "audit_events", "import_jobs", "import_job_rows", "case_events", "case_evidence", "verification_runs", "verification_rule_results", "app_migrations", "institution_source_datasets", "institution_source_uploads", "institution_source_records", "institution_source_comparisons", "programmes", "intake_allocations", "enrolments", "enrolment_submissions", "data_use_authorizations", "central_submission_batches", "central_submission_events", "institution_registry", "institution_api_credentials", "institution_api_idempotency", "approved_intake_records"}
         missing_tables = required_tables - tables
         needs_upgrade = bool(missing_tables)
         triggers = {row[0] for row in source.execute(
@@ -120,9 +134,12 @@ def backup_before_schema_upgrade():
         if "students" in tables:
             student_columns = {row[1] for row in source.execute("PRAGMA table_info(students)")}
             needs_upgrade = needs_upgrade or "archived_at" not in student_columns
+        if "enrolments" in tables:
+            enrolment_columns = {row[1] for row in source.execute("PRAGMA table_info(enrolments)")}
+            needs_upgrade = needs_upgrade or not {"student_category", "seat_type"}.issubset(enrolment_columns)
         if "enrolment_submissions" in tables:
             submission_columns = {row[1] for row in source.execute("PRAGMA table_info(enrolment_submissions)")}
-            needs_upgrade = needs_upgrade or "authorization_id" not in submission_columns
+            needs_upgrade = needs_upgrade or not {"authorization_id", "snapshot_json", "snapshot_hash"}.issubset(submission_columns)
         if "institution_source_uploads" in tables:
             source_columns = {row[1] for row in source.execute("PRAGMA table_info(institution_source_uploads)")}
             needs_upgrade = needs_upgrade or "change_summary_json" not in source_columns
@@ -328,6 +345,27 @@ def init_db():
             FOREIGN KEY(programme_id) REFERENCES programmes(id) ON DELETE RESTRICT
         );
 
+        CREATE TABLE IF NOT EXISTS approved_intake_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institution TEXT NOT NULL,
+            programme_id INTEGER NOT NULL,
+            intake_year INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK(version > 0),
+            sanctioned_intake INTEGER NOT NULL CHECK(sanctioned_intake > 0),
+            supernumerary_limit INTEGER NOT NULL DEFAULT 0 CHECK(supernumerary_limit >= 0),
+            approval_reference TEXT NOT NULL,
+            source_reference TEXT NOT NULL,
+            approval_date TEXT,
+            status TEXT NOT NULL DEFAULT 'current' CHECK(status IN ('current','superseded')),
+            recorded_by TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            superseded_at TEXT,
+            UNIQUE(institution,programme_id,intake_year,version),
+            FOREIGN KEY(programme_id) REFERENCES programmes(id) ON DELETE RESTRICT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_intake_current
+            ON approved_intake_records(institution,programme_id,intake_year) WHERE status='current';
+
         CREATE TABLE IF NOT EXISTS enrolments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             institution TEXT NOT NULL,
@@ -446,6 +484,80 @@ def init_db():
             FOREIGN KEY(dataset_id) REFERENCES institution_source_datasets(id) ON DELETE RESTRICT
         );
 
+        CREATE TABLE IF NOT EXISTS central_submission_batches (
+            id TEXT PRIMARY KEY,
+            institution TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            academic_year INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('submitted','processing','requires_review','accepted','returned_for_correction','superseded')),
+            submitted_by TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            reviewed_by TEXT,
+            reviewed_at TEXT,
+            review_note TEXT NOT NULL DEFAULT '',
+            record_count INTEGER NOT NULL CHECK(record_count >= 0),
+            flagged_count INTEGER NOT NULL DEFAULT 0 CHECK(flagged_count >= 0),
+            previous_batch_id TEXT,
+            content_hash TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            UNIQUE(institution, version),
+            UNIQUE(institution, content_hash),
+            FOREIGN KEY(previous_batch_id) REFERENCES central_submission_batches(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_central_batches_status_date
+            ON central_submission_batches(status, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_central_batches_institution
+            ON central_submission_batches(institution, submitted_at DESC);
+
+        CREATE TABLE IF NOT EXISTS central_submission_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            institution TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            from_status TEXT,
+            to_status TEXT,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(batch_id) REFERENCES central_submission_batches(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_central_submission_events_batch
+            ON central_submission_events(batch_id, id);
+
+        CREATE TABLE IF NOT EXISTS institution_registry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institution_code TEXT NOT NULL UNIQUE,
+            institution_name TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended')),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS institution_api_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institution_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_prefix TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT,
+            FOREIGN KEY(institution_id) REFERENCES institution_registry(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_institution_api_credentials_active
+            ON institution_api_credentials(institution_id, revoked_at);
+        CREATE TABLE IF NOT EXISTS institution_api_idempotency (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institution_id INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(institution_id, idempotency_key),
+            FOREIGN KEY(institution_id) REFERENCES institution_registry(id) ON DELETE RESTRICT,
+            FOREIGN KEY(batch_id) REFERENCES central_submission_batches(id) ON DELETE RESTRICT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_students_name
             ON students(full_name);
 
@@ -453,6 +565,11 @@ def init_db():
             ON students(status);
         """)
 
+        enrolment_columns = {row[1] for row in db.execute("PRAGMA table_info(enrolments)")}
+        if "student_category" not in enrolment_columns:
+            db.execute("ALTER TABLE enrolments ADD COLUMN student_category TEXT NOT NULL DEFAULT 'unknown'")
+        if "seat_type" not in enrolment_columns:
+            db.execute("ALTER TABLE enrolments ADD COLUMN seat_type TEXT NOT NULL DEFAULT 'regular'")
         user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
         if "institution" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN institution TEXT NOT NULL DEFAULT 'MITAOE Demo Campus'")
@@ -508,6 +625,10 @@ def init_db():
         submission_columns = {row[1] for row in db.execute("PRAGMA table_info(enrolment_submissions)")}
         if "authorization_id" not in submission_columns:
             db.execute("ALTER TABLE enrolment_submissions ADD COLUMN authorization_id INTEGER REFERENCES data_use_authorizations(id) ON DELETE RESTRICT")
+        if "snapshot_json" not in submission_columns:
+            db.execute("ALTER TABLE enrolment_submissions ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
+        if "snapshot_hash" not in submission_columns:
+            db.execute("ALTER TABLE enrolment_submissions ADD COLUMN snapshot_hash TEXT NOT NULL DEFAULT ''")
 
         admin_exists = db.execute(
             "SELECT id FROM users WHERE username='admin'"
@@ -519,7 +640,7 @@ def init_db():
                 raise RuntimeError(
                     "Set DEMO_ADMIN_PASSWORD in your private .env before initializing the first admin"
                 )
-            if os.environ.get("FLASK_ENV", "").strip().lower() == "production" and len(admin_password) < 16:
+            if production_mode and len(admin_password) < 16:
                 raise RuntimeError(
                     "Set a private DEMO_ADMIN_PASSWORD of at least 16 characters before initializing the production admin"
                 )
@@ -729,7 +850,7 @@ def _send_auth_code(email, code, subject, body):
         return
     host = os.environ.get("SMTP_HOST", "").strip()
     if not host:
-        if os.environ.get("FLASK_ENV") == "production":
+        if production_mode:
             raise RuntimeError("Email delivery is not configured.")
         app.logger.warning("LOCAL DEVELOPMENT AUTH MESSAGE for %s: %s | %s", email or "(no email)", subject, body.format(code=code))
         return
@@ -807,7 +928,7 @@ def verify_otp():
                     db.commit()
             session.permanent = True
             audit("login_otp_verified", "user", username, "Password and email OTP verified")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("central_oversight_dashboard") if user["role"] == "platform_admin" else url_for("dashboard"))
         flash("The code is invalid, expired, or has reached its attempt limit.", "error")
     return render_template("verify_otp.html")
 
@@ -930,7 +1051,7 @@ def login():
         if len(recent_failures) >= LOGIN_FAILURE_LIMIT:
             login_failures[client_ip] = recent_failures
             flash("Too many sign-in attempts. Try again in 15 minutes.", "error")
-            return render_template("login.html", show_demo_credentials=os.environ.get("FLASK_ENV") != "production"), 429
+            return render_template("login.html", show_demo_credentials=not production_mode), 429
 
         with connect_db() as db:
             user = db.execute(
@@ -944,7 +1065,7 @@ def login():
             if not email:
                 # First-run bootstrap only: permit the seeded local administrator to enroll an email.
                 # Every subsequent sign-in requires OTP once an address is present.
-                if os.environ.get("FLASK_ENV") == "production":
+                if production_mode:
                     flash("This account has no email address. Ask the system administrator to configure it securely.", "error")
                     return render_template("login.html", show_demo_credentials=False), 403
                 session.clear()
@@ -961,7 +1082,7 @@ def login():
             except (RuntimeError, OSError):
                 app.logger.exception("Login OTP delivery failed")
                 flash("We could not send a security code. Please try later or contact your administrator.", "error")
-                return render_template("login.html", show_demo_credentials=os.environ.get("FLASK_ENV") != "production"), 503
+                return render_template("login.html", show_demo_credentials=not production_mode), 503
             session.clear()
             session["_csrf_token"] = secrets.token_urlsafe(32)
             session["pending_otp_username"] = user["username"]
@@ -972,7 +1093,7 @@ def login():
         login_failures[client_ip] = recent_failures
         flash("Invalid username or password.", "error")
 
-    return render_template("login.html", show_demo_credentials=os.environ.get("FLASK_ENV") != "production")
+    return render_template("login.html", show_demo_credentials=not production_mode)
 
 
 @app.route("/logout", methods=["POST"])
@@ -1125,6 +1246,25 @@ def inject_globals():
 def demo_page():
     """Temporary browser-only demo using synthetic records; never writes to the database."""
     return render_template("demo.html")
+
+
+@app.route("/identity-reconciliation")
+@login_required
+@role_required("institution_admin", "operator", "verifier", "auditor")
+def identity_reconciliation_page():
+    """Show synthetic/demo cross-institution candidates only when explicitly enabled."""
+    if not app.config.get("ENABLE_SHARED_DEMO_RECONCILIATION", False):
+        abort(503, description="Shared-database reconciliation is disabled by default. Enable it only for an isolated synthetic-data demo.")
+    institution = session.get("institution", "")
+    with connect_db() as db:
+        records = [dict(row) for row in db.execute("""SELECT id,institution_student_id,full_name,institution,
+            apaar_id,archived_at FROM students WHERE archived_at IS NULL AND trim(apaar_id)<>''
+            ORDER BY institution,id""").fetchall()]
+    candidates = reconcile_records(records, institution)
+    audit("identity_reconciliation.viewed", "identity_reconciliation", institution,
+          f"Viewed {len(candidates)} institution-scoped candidate(s); ruleset {IDENTITY_RECONCILIATION_RULESET_VERSION}; no identifiers logged")
+    return render_template("identity_reconciliation.html", candidates=candidates,
+                           ruleset_version=IDENTITY_RECONCILIATION_RULESET_VERSION)
 
 
 @app.route("/")
@@ -2370,6 +2510,703 @@ def too_large(_error):
 # Admissions and intake workflow (institution-scoped)
 # ---------------------------------------------------------
 
+
+
+# ---------------------------------------------------------
+# Central institutional submission workflow (synthetic prototype)
+# ---------------------------------------------------------
+
+CENTRAL_BATCH_STATUSES = (
+    "submitted", "processing", "requires_review", "accepted",
+    "returned_for_correction", "superseded"
+)
+CENTRAL_STATUS_TRANSITIONS = {
+    "submitted": {"processing", "requires_review", "returned_for_correction"},
+    "processing": {"requires_review", "accepted", "returned_for_correction"},
+    "requires_review": {"processing", "accepted", "returned_for_correction"},
+    "returned_for_correction": set(),
+    "accepted": {"superseded"},
+    "superseded": set(),
+}
+
+
+def _central_batch_integrity(batch):
+    """Check the stored snapshot against its digest; this is not a signature."""
+    try:
+        payload = batch["snapshot_json"]
+        return hmac.compare_digest(
+            hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            batch["content_hash"],
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+@app.route("/central-submissions", methods=["GET", "POST"])
+@login_required
+@role_required("institution_admin", "operator", "verifier", "auditor")
+def central_submission_workspace():
+    """Institution-scoped submission of frozen admissions snapshots to the demo central register."""
+    institution = session.get("institution", "")
+    if request.method == "POST":
+        if session.get("role") not in {"admin", "institution_admin", "operator"}:
+            abort(403)
+        try:
+            academic_year = int(request.form.get("academic_year", ""))
+        except (TypeError, ValueError):
+            flash("Choose a valid academic year.", "error")
+            return redirect(url_for("central_submission_workspace"))
+        current_year = datetime.now().year
+        if academic_year < 2000 or academic_year > current_year + 5:
+            flash("Academic year is outside the supported range.", "error")
+            return redirect(url_for("central_submission_workspace"))
+
+        with connect_db() as db:
+            # Only the latest version of each enrolment, still awaiting review, is eligible.
+            rows = db.execute("""
+                SELECT sub.id AS local_submission_id, sub.enrolment_id, sub.version,
+                       sub.status AS local_submission_status, sub.submitted_at,
+                       sub.snapshot_json, sub.snapshot_hash
+                FROM enrolment_submissions sub
+                JOIN (
+                    SELECT enrolment_id, MAX(version) AS latest_version
+                    FROM enrolment_submissions
+                    WHERE institution=?
+                    GROUP BY enrolment_id
+                ) latest ON latest.enrolment_id=sub.enrolment_id
+                         AND latest.latest_version=sub.version
+                WHERE sub.institution=? AND sub.status='submitted'
+                ORDER BY sub.enrolment_id
+            """, (institution, institution)).fetchall()
+
+            snapshots = []
+            for row in rows:
+                try:
+                    item = json.loads(row["snapshot_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if int(item.get("intake_year", -1)) != academic_year:
+                    continue
+                # Keep the central payload minimal. No APAAR-like identifier, email,
+                # notes, or local database primary keys are transmitted.
+                snapshots.append({
+                    "institutional_enrolment_id": str(item.get("institutional_enrolment_id", "")),
+                    "institution_student_id": str(item.get("institution_student_id", "")),
+                    "student_name": str(item.get("full_name", "")),
+                    "programme_code": str(item.get("programme_code", "")),
+                    "programme_name": str(item.get("programme_name", "")),
+                    "academic_year": academic_year,
+                    "enrolment_status": str(item.get("enrolment_status", "submitted")),
+                    "student_category": str(item.get("student_category", "unknown")),
+                    "seat_type": str(item.get("seat_type", "regular")),
+                    "configured_capacity": int(item.get("configured_capacity", 0) or 0),
+                    "local_submission_version": int(row["version"]),
+                    "source_snapshot_hash": str(row["snapshot_hash"] or ""),
+                })
+
+            if not snapshots:
+                flash("No latest, submitted admissions records were found for that academic year. Submit eligible enrolments first.", "error")
+                return redirect(url_for("central_submission_workspace"))
+
+            # Count enrolments by programme. These signals use institution-configured
+            # capacity only; they are not regulatory findings or approved-intake checks.
+            groups = {}
+            for item in snapshots:
+                key = (item["programme_code"], item["academic_year"])
+                groups.setdefault(key, {"count": 0, "capacity": item["configured_capacity"]})
+                groups[key]["count"] += 1
+            flagged_groups = {
+                key for key, summary in groups.items()
+                if summary["capacity"] > 0 and summary["count"] > summary["capacity"]
+            }
+            flagged_count = 0
+            for item in snapshots:
+                key = (item["programme_code"], item["academic_year"])
+                item["preliminary_flags"] = (
+                    ["CONFIGURED_CAPACITY_EXCEEDED"] if key in flagged_groups else []
+                )
+                if item["preliminary_flags"]:
+                    flagged_count += 1
+
+            snapshot_doc = {
+                "schema": "central-admissions-batch-v1",
+                "authority_level": "DEMO_ONLY_NOT_OFFICIAL_AICTE_SUBMISSION",
+                "institution": institution,
+                "academic_year": academic_year,
+                "record_count": len(snapshots),
+                "records": snapshots,
+            }
+            snapshot_json = json.dumps(snapshot_doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            content_hash = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            existing = db.execute(
+                "SELECT id FROM central_submission_batches WHERE institution=? AND content_hash=?",
+                (institution, content_hash),
+            ).fetchone()
+            if existing:
+                flash(f"This exact batch was already submitted (reference {existing['id']}). Duplicate processing was prevented.", "warning")
+                return redirect(url_for("central_submission_workspace"))
+
+            db.execute("BEGIN IMMEDIATE")
+            version = db.execute(
+                "SELECT COALESCE(MAX(version),0)+1 FROM central_submission_batches WHERE institution=?",
+                (institution,),
+            ).fetchone()[0]
+            previous = db.execute(
+                "SELECT id FROM central_submission_batches WHERE institution=? ORDER BY version DESC LIMIT 1",
+                (institution,),
+            ).fetchone()
+            batch_id = secrets.token_hex(12)
+            timestamp = now()
+            db.execute("""
+                INSERT INTO central_submission_batches(
+                    id,institution,version,academic_year,status,submitted_by,submitted_at,
+                    record_count,flagged_count,previous_batch_id,content_hash,snapshot_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                batch_id, institution, version, academic_year, "submitted",
+                session["username"], timestamp, len(snapshots), flagged_count,
+                previous["id"] if previous else None, content_hash, snapshot_json,
+            ))
+            db.execute("""
+                INSERT INTO central_submission_events(
+                    batch_id,institution,actor,event_type,from_status,to_status,note,created_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+            """, (batch_id, institution, session["username"], "batch_submitted", None,
+                  "submitted", "Synthetic demo batch created from frozen admissions submission snapshots.", timestamp))
+            db.commit()
+
+        audit("central_submission.created", "central_submission_batch", batch_id,
+              f"Created synthetic batch v{version}; records={len(snapshots)}; flags={flagged_count}; no APAAR IDs included")
+        flash(f"Demo central batch {batch_id} created with {len(snapshots)} record(s). This is not an official AICTE submission.", "success")
+        return redirect(url_for("central_submission_workspace"))
+
+    with connect_db() as db:
+        batches = db.execute("""
+            SELECT id,institution,version,academic_year,status,submitted_by,submitted_at,
+                   reviewed_by,reviewed_at,review_note,record_count,flagged_count,
+                   previous_batch_id,content_hash,snapshot_json
+            FROM central_submission_batches
+            WHERE institution=?
+            ORDER BY submitted_at DESC,version DESC LIMIT 100
+        """, (institution,)).fetchall()
+        batches = [dict(row, integrity_ok=_central_batch_integrity(row)) for row in batches]
+        year_rows = db.execute("""
+            SELECT snapshot_json FROM enrolment_submissions
+            WHERE institution=? AND status='submitted' AND snapshot_json IS NOT NULL
+            ORDER BY submitted_at DESC
+        """, (institution,)).fetchall()
+        available_years = set()
+        for year_row in year_rows:
+            try:
+                value = json.loads(year_row["snapshot_json"]).get("intake_year")
+                year_value = int(value)
+                if 2000 <= year_value <= datetime.now().year + 5:
+                    available_years.add(year_value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    return render_template("central_submissions.html", batches=batches,
+                           available_years=sorted(available_years, reverse=True),
+                           statuses=CENTRAL_BATCH_STATUSES, current_year=datetime.now().year)
+
+
+@app.route("/central-oversight", methods=["GET"])
+@login_required
+@role_required("platform_admin")
+def central_oversight_dashboard():
+    """Platform-wide, read-only oversight of synthetic demo batches."""
+    with connect_db() as db:
+        totals = db.execute("""
+            SELECT COUNT(*) AS batch_count,
+                   COALESCE(SUM(record_count),0) AS record_count,
+                   COALESCE(SUM(flagged_count),0) AS flagged_count,
+                   SUM(CASE WHEN status IN ('submitted','processing','requires_review','returned_for_correction') THEN 1 ELSE 0 END) AS open_count
+            FROM central_submission_batches
+        """).fetchone()
+        batches = db.execute("""
+            SELECT id,institution,version,academic_year,status,submitted_by,submitted_at,
+                   reviewed_by,reviewed_at,review_note,record_count,flagged_count,
+                   previous_batch_id,content_hash,snapshot_json
+            FROM central_submission_batches
+            ORDER BY CASE status WHEN 'requires_review' THEN 0 WHEN 'submitted' THEN 1
+                WHEN 'processing' THEN 2 WHEN 'returned_for_correction' THEN 3 ELSE 4 END,
+                submitted_at DESC LIMIT 250
+        """).fetchall()
+        batches = [dict(row, integrity_ok=_central_batch_integrity(row)) for row in batches]
+        institutions = db.execute("""
+            SELECT institution,COUNT(*) AS batch_count,MAX(submitted_at) AS last_submission,
+                   SUM(record_count) AS records, SUM(flagged_count) AS flagged
+            FROM central_submission_batches GROUP BY institution ORDER BY institution
+        """).fetchall()
+    return render_template("central_oversight.html", totals=totals, batches=batches,
+                           institutions=institutions, current_year=datetime.now().year)
+
+
+@app.route("/central-oversight/<batch_id>", methods=["GET", "POST"])
+@login_required
+@role_required("platform_admin")
+def central_batch_detail(batch_id):
+    """Central reviewer can inspect minimal snapshot fields and make a recorded state transition."""
+    with connect_db() as db:
+        batch = db.execute("SELECT * FROM central_submission_batches WHERE id=?", (batch_id,)).fetchone()
+        if not batch:
+            abort(404)
+        integrity_ok = _central_batch_integrity(batch)
+        if request.method == "POST":
+            target = request.form.get("status", "").strip()
+            note = request.form.get("review_note", "").strip()[:1000]
+            allowed = CENTRAL_STATUS_TRANSITIONS.get(batch["status"], set())
+            if target not in allowed:
+                flash("That status transition is not permitted.", "error")
+                return redirect(url_for("central_batch_detail", batch_id=batch_id))
+            if target in {"requires_review", "returned_for_correction"} and not note:
+                flash("Add a reason for a review or correction request.", "error")
+                return redirect(url_for("central_batch_detail", batch_id=batch_id))
+            if not integrity_ok:
+                flash("Snapshot integrity check failed. The batch is read-only and cannot be advanced.", "error")
+                return redirect(url_for("central_batch_detail", batch_id=batch_id))
+            timestamp = now()
+            updated = db.execute("""
+                UPDATE central_submission_batches
+                SET status=?,reviewed_by=?,reviewed_at=?,review_note=?
+                WHERE id=? AND status=?
+            """, (target, session["username"], timestamp, note, batch_id, batch["status"])).rowcount
+            if not updated:
+                db.rollback()
+                flash("The batch changed during review. Refresh before trying again.", "error")
+                return redirect(url_for("central_batch_detail", batch_id=batch_id))
+            db.execute("""
+                INSERT INTO central_submission_events(
+                    batch_id,institution,actor,event_type,from_status,to_status,note,created_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+            """, (batch_id, batch["institution"], session["username"], "status_changed",
+                  batch["status"], target, note, timestamp))
+            db.commit()
+            audit("central_submission.status_changed", "central_submission_batch", batch_id,
+                  f"{batch['status']} -> {target}; note required where applicable")
+            flash("Central review decision recorded.", "success")
+            return redirect(url_for("central_batch_detail", batch_id=batch_id))
+
+        try:
+            snapshot = json.loads(batch["snapshot_json"])
+        except (TypeError, json.JSONDecodeError):
+            snapshot = {"records": []}
+        events = db.execute("""
+            SELECT actor,event_type,from_status,to_status,note,created_at
+            FROM central_submission_events WHERE batch_id=? ORDER BY id
+        """, (batch_id,)).fetchall()
+    return render_template("central_batch_detail.html", batch=batch, snapshot=snapshot,
+                           events=events, integrity_ok=integrity_ok,
+                           transitions=sorted(CENTRAL_STATUS_TRANSITIONS.get(batch["status"], set())),
+                           current_year=datetime.now().year)
+
+
+
+# ---------------------------------------------------------
+# Phase 5: institution registry and authenticated submissions
+# ---------------------------------------------------------
+
+def _new_institution_token():
+    return "apaar_inst_" + secrets.token_urlsafe(36)
+
+
+def _token_digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@app.route("/central-institutions", methods=["GET", "POST"])
+@login_required
+@role_required("platform_admin")
+def central_institutions():
+    """Manage institution onboarding and one-time service credential issuance."""
+    revealed_token = None
+    if request.method == "POST":
+        action = request.form.get("action", "create").strip()
+        try:
+            institution_id = int(request.form.get("institution_id", "0"))
+        except (TypeError, ValueError):
+            institution_id = 0
+        timestamp = now()
+        if action == "create":
+            code = request.form.get("institution_code", "").strip().upper()
+            name = request.form.get("institution_name", "").strip()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{1,31}", code) or not name or len(name) > 160:
+                flash("Use a 2–32 character institution code (letters, numbers, _ or -) and a name up to 160 characters.", "error")
+            else:
+                try:
+                    with connect_db() as db:
+                        db.execute("""INSERT INTO institution_registry(
+                            institution_code,institution_name,status,created_by,created_at,updated_at
+                        ) VALUES(?,?,'active',?,?,?)""",
+                                   (code, name, session["username"], timestamp, timestamp))
+                        db.commit()
+                    audit("institution_registry.created", "institution", code, "Institution onboarded in prototype registry")
+                    flash("Institution registered. Create a service credential separately and share it securely.", "success")
+                except sqlite3.IntegrityError:
+                    flash("That institution code or name is already registered.", "error")
+        elif action == "status":
+            target = request.form.get("status", "").strip()
+            if target not in {"active", "suspended"} or institution_id <= 0:
+                flash("Invalid institution status update.", "error")
+            else:
+                with connect_db() as db:
+                    row = db.execute("SELECT institution_code,institution_name,status FROM institution_registry WHERE id=?",
+                                     (institution_id,)).fetchone()
+                    if not row:
+                        flash("Institution not found.", "error")
+                    else:
+                        db.execute("UPDATE institution_registry SET status=?,updated_at=? WHERE id=?",
+                                   (target, timestamp, institution_id))
+                        db.commit()
+                        audit("institution_registry.status_changed", "institution", row["institution_code"],
+                              f"{row['status']} -> {target}")
+                        flash(f"Institution status updated to {target}.", "success")
+        elif action == "issue_credential":
+            if institution_id <= 0:
+                flash("Select a valid institution.", "error")
+            else:
+                token = _new_institution_token()
+                with connect_db() as db:
+                    institution = db.execute("SELECT * FROM institution_registry WHERE id=?",
+                                             (institution_id,)).fetchone()
+                    if not institution:
+                        flash("Institution not found.", "error")
+                    elif institution["status"] != "active":
+                        flash("Credentials cannot be issued to a suspended institution.", "error")
+                    else:
+                        db.execute("""INSERT INTO institution_api_credentials(
+                            institution_id,token_hash,token_prefix,created_by,created_at
+                        ) VALUES(?,?,?,?,?)""",
+                                   (institution_id, _token_digest(token), token[:18],
+                                    session["username"], timestamp))
+                        db.commit()
+                        revealed_token = {"institution_name": institution["institution_name"], "token": token}
+                        audit("institution_api.credential_issued", "institution", institution["institution_code"],
+                              "A one-time service credential was issued; raw token is not stored.")
+        else:
+            flash("Unknown registry action.", "error")
+
+    with connect_db() as db:
+        institutions = db.execute("""
+            SELECT i.*,
+              (SELECT COUNT(*) FROM institution_api_credentials c
+               WHERE c.institution_id=i.id AND c.revoked_at IS NULL) AS active_credentials,
+              (SELECT MAX(c.last_used_at) FROM institution_api_credentials c
+               WHERE c.institution_id=i.id AND c.revoked_at IS NULL) AS last_api_use
+            FROM institution_registry i ORDER BY i.institution_name
+        """).fetchall()
+        credentials = db.execute("""
+            SELECT c.id,c.institution_id,c.token_prefix,c.created_by,c.created_at,c.last_used_at,c.revoked_at,
+                   i.institution_name,i.institution_code
+            FROM institution_api_credentials c JOIN institution_registry i ON i.id=c.institution_id
+            ORDER BY c.created_at DESC LIMIT 200
+        """).fetchall()
+    return render_template("central_institutions.html", institutions=institutions,
+                           credentials=credentials, revealed_token=revealed_token,
+                           current_year=datetime.now().year)
+
+
+@app.post("/central-institutions/credentials/<int:credential_id>/revoke")
+@login_required
+@role_required("platform_admin")
+def revoke_institution_credential(credential_id):
+    timestamp = now()
+    with connect_db() as db:
+        credential = db.execute("""SELECT c.id,c.revoked_at,i.institution_code
+            FROM institution_api_credentials c JOIN institution_registry i ON i.id=c.institution_id
+            WHERE c.id=?""", (credential_id,)).fetchone()
+        if not credential:
+            abort(404)
+        if credential["revoked_at"] is None:
+            db.execute("UPDATE institution_api_credentials SET revoked_at=? WHERE id=?",
+                       (timestamp, credential_id))
+            db.commit()
+            audit("institution_api.credential_revoked", "institution", credential["institution_code"],
+                  "Service credential revoked by platform administrator.")
+            flash("Service credential revoked.", "success")
+        else:
+            flash("Credential was already revoked.", "info")
+    return redirect(url_for("central_institutions"))
+
+
+def _authenticate_institution_api():
+    """Return active registry and credential rows or a JSON error response."""
+    auth = request.headers.get("Authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token or len(token) > 256:
+        return None, ({"error": "unauthorized", "message": "A valid Bearer service credential is required."}, 401)
+    digest = _token_digest(token)
+    with connect_db() as db:
+        credential = db.execute("""
+            SELECT c.id AS credential_id,c.institution_id,c.token_hash,c.revoked_at,
+                   i.institution_code,i.institution_name,i.status
+            FROM institution_api_credentials c
+            JOIN institution_registry i ON i.id=c.institution_id
+            WHERE c.token_hash=?
+        """, (digest,)).fetchone()
+        if not credential or credential["revoked_at"] is not None:
+            return None, ({"error": "unauthorized", "message": "Credential is invalid or revoked."}, 401)
+        if credential["status"] != "active":
+            return None, ({"error": "forbidden", "message": "Institution is suspended."}, 403)
+        db.execute("UPDATE institution_api_credentials SET last_used_at=? WHERE id=?",
+                   (now(), credential["credential_id"]))
+        db.commit()
+        return dict(credential), None
+
+
+@app.route("/api/v1/institution-submissions", methods=["POST"])
+def institutional_submission_api():
+    """
+    Versioned service-to-service endpoint. This accepts only a defined minimal
+    payload; it does not claim official APAAR/AICTE verification.
+    """
+    institution, error = _authenticate_institution_api()
+    if error:
+        body, status = error
+        return Response(json.dumps(body), status=status, mimetype="application/json")
+    if not request.is_json:
+        return Response(json.dumps({"error": "invalid_request", "message": "Content-Type must be application/json."}),
+                        status=415, mimetype="application/json")
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return Response(json.dumps({"error": "invalid_request", "message": "JSON object required."}),
+                        status=400, mimetype="application/json")
+    try:
+        academic_year = int(body.get("academic_year"))
+    except (TypeError, ValueError, OverflowError):
+        academic_year = 0
+    current_year = datetime.now().year
+    records = body.get("records")
+    if not (2000 <= academic_year <= current_year + 5):
+        return Response(json.dumps({"error": "invalid_academic_year", "message": "Academic year is outside the accepted range."}),
+                        status=400, mimetype="application/json")
+    if not isinstance(records, list) or not records or len(records) > 5000:
+        return Response(json.dumps({"error": "invalid_records", "message": "records must contain 1 to 5000 items."}),
+                        status=400, mimetype="application/json")
+
+    allowed_statuses = {"draft", "submitted", "under_review", "approved", "rejected", "withdrawn", "returned_for_correction"}
+    normalized = []
+    seen_ids = set()
+    required_fields = ("institutional_enrolment_id", "institution_student_id", "student_name",
+                       "programme_code", "programme_name", "enrolment_status")
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} must be an object."}),
+                            status=400, mimetype="application/json")
+        item = {"academic_year": academic_year, "preliminary_flags": []}
+        for field in required_fields:
+            value = record.get(field)
+            if not isinstance(value, str) or not value.strip():
+                return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} requires {field}."}),
+                                status=400, mimetype="application/json")
+            value = value.strip()
+            max_lengths = {"institutional_enrolment_id": 80, "institution_student_id": 80,
+                           "student_name": 160, "programme_code": 32, "programme_name": 160,
+                           "enrolment_status": 32}
+            if len(value) > max_lengths[field]:
+                return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} field {field} exceeds its length limit."}),
+                                status=400, mimetype="application/json")
+            item[field] = value
+        if item["enrolment_status"] not in allowed_statuses:
+            return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} has an unsupported enrolment_status."}),
+                            status=400, mimetype="application/json")
+        # Optional, backward-compatible classification fields for monitoring only.
+        category = record.get("student_category", "unknown")
+        seat_type = record.get("seat_type", "regular")
+        if not isinstance(category, str) or not isinstance(seat_type, str):
+            return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} student_category and seat_type must be strings."}),
+                            status=400, mimetype="application/json")
+        item["student_category"] = category.strip()
+        item["seat_type"] = seat_type.strip()
+        if item["student_category"] not in {"domestic", "nri", "oci", "foreign_national", "unknown"}:
+            return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} has an unsupported student_category."}),
+                            status=400, mimetype="application/json")
+        if item["seat_type"] not in {"regular", "supernumerary"}:
+            return Response(json.dumps({"error": "invalid_record", "message": f"Record {index + 1} has an unsupported seat_type."}),
+                            status=400, mimetype="application/json")
+        unique_id = item["institutional_enrolment_id"].casefold()
+        if unique_id in seen_ids:
+            return Response(json.dumps({"error": "duplicate_record_id", "message": f"Duplicate institutional_enrolment_id in record {index + 1}."}),
+                            status=400, mimetype="application/json")
+        seen_ids.add(unique_id)
+        normalized.append(item)
+
+    snapshot = {"schema_version": "institution-submission-v1", "institution_code": institution["institution_code"],
+                "institution_name": institution["institution_name"], "academic_year": academic_year,
+                "records": normalized}
+    canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if not idempotency_key or len(idempotency_key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
+        return Response(json.dumps({"error": "idempotency_key_required", "message": "Send an Idempotency-Key header (8–128 letters, numbers, . _ : or -)."}),
+                        status=400, mimetype="application/json")
+
+    with connect_db() as db:
+        # Serialize idempotency/content checks with batch creation to avoid race-created duplicate batches.
+        db.execute("BEGIN IMMEDIATE")
+        previous_request = db.execute("""
+            SELECT request_hash,batch_id FROM institution_api_idempotency
+            WHERE institution_id=? AND idempotency_key=?
+        """, (institution["institution_id"], idempotency_key)).fetchone()
+        if previous_request:
+            if not hmac.compare_digest(previous_request["request_hash"], request_hash):
+                db.rollback()
+                return Response(json.dumps({"error": "idempotency_conflict", "message": "This Idempotency-Key was already used with a different payload."}),
+                                status=409, mimetype="application/json")
+            batch = db.execute("SELECT id,version,status,content_hash,submitted_at FROM central_submission_batches WHERE id=?",
+                               (previous_request["batch_id"],)).fetchone()
+            db.commit()
+            return Response(json.dumps({"batch": dict(batch), "idempotent_replay": True}),
+                            status=200, mimetype="application/json")
+        duplicate = db.execute("""SELECT id,version,status FROM central_submission_batches
+            WHERE institution=? AND content_hash=?""",
+                                (institution["institution_name"], request_hash)).fetchone()
+        if duplicate:
+            db.rollback()
+            return Response(json.dumps({"error": "duplicate_submission", "message": "Identical content already exists as a central batch.",
+                                        "existing_batch_id": duplicate["id"], "version": duplicate["version"]}),
+                            status=409, mimetype="application/json")
+        previous = db.execute("""SELECT id,version FROM central_submission_batches
+            WHERE institution=? ORDER BY version DESC LIMIT 1""", (institution["institution_name"],)).fetchone()
+        version = int(previous["version"]) + 1 if previous else 1
+        batch_id = secrets.token_urlsafe(18)
+        timestamp = now()
+        db.execute("""INSERT INTO central_submission_batches(
+            id,institution,version,academic_year,status,submitted_by,submitted_at,
+            record_count,flagged_count,previous_batch_id,content_hash,snapshot_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (batch_id, institution["institution_name"], version, academic_year, "submitted",
+                    f"service:{institution['institution_code']}", timestamp, len(normalized), 0,
+                    previous["id"] if previous else None, request_hash, canonical))
+        db.execute("""INSERT INTO central_submission_events(
+            batch_id,institution,actor,event_type,from_status,to_status,note,created_at
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+                   (batch_id, institution["institution_name"], f"service:{institution['institution_code']}",
+                    "api_batch_submitted", None, "submitted",
+                    "Authenticated institutional API submission; no authoritative APAAR verification performed.", timestamp))
+        db.execute("""INSERT INTO institution_api_idempotency(
+            institution_id,idempotency_key,request_hash,batch_id,created_at
+        ) VALUES(?,?,?,?,?)""",
+                   (institution["institution_id"], idempotency_key, request_hash, batch_id, timestamp))
+        db.execute("""INSERT INTO audit_logs(institution,actor,action,entity,entity_id,details,created_at)
+            VALUES(?,?,?,?,?,?,?)""",
+                   (institution["institution_name"], f"service:{institution['institution_code']}",
+                    "institution_api.submission_created", "central_submission_batch", batch_id,
+                    f"API v1 submission; records={len(normalized)}; idempotency key stored; no APAAR IDs accepted.", timestamp))
+        db.commit()
+    return Response(json.dumps({"batch": {"id": batch_id, "version": version, "status": "submitted",
+                                         "academic_year": academic_year, "record_count": len(normalized),
+                                         "content_hash": request_hash, "submitted_at": timestamp},
+                                "idempotent_replay": False}),
+                    status=201, mimetype="application/json")
+
+
+@app.route("/admissions/approved-intake", methods=["POST"])
+@login_required
+@role_required("institution_admin", "operator")
+def approved_intake_create():
+    """Record a versioned intake figure with references; it is not independently verified."""
+    try:
+        programme_id = int(request.form.get("programme_id", ""))
+        year = int(request.form.get("intake_year", ""))
+        sanctioned_intake = int(request.form.get("sanctioned_intake", ""))
+        supernumerary_limit = int(request.form.get("supernumerary_limit", "0"))
+        approval_reference = request.form.get("approval_reference", "").strip()
+        source_reference = request.form.get("source_reference", "").strip()
+        approval_date = request.form.get("approval_date", "").strip() or None
+        if not (2000 <= year <= 2100 and 1 <= sanctioned_intake <= 100000 and 0 <= supernumerary_limit <= 100000):
+            raise ValueError
+        if not approval_reference or len(approval_reference) > 120 or not source_reference or len(source_reference) > 240:
+            raise ValueError
+        if approval_date:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approval_date):
+                raise ValueError
+            datetime.strptime(approval_date, "%Y-%m-%d")
+        with connect_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            programme = db.execute("SELECT id,code FROM programmes WHERE id=? AND institution=? AND active=1",
+                                   (programme_id, session["institution"])).fetchone()
+            if not programme:
+                db.rollback()
+                flash("Choose an active programme belonging to your institution.", "error")
+                return redirect(url_for("admissions_monitoring"))
+            latest = db.execute("SELECT COALESCE(MAX(version),0) FROM approved_intake_records WHERE institution=? AND programme_id=? AND intake_year=?",
+                                (session["institution"], programme_id, year)).fetchone()[0]
+            timestamp = now()
+            db.execute("UPDATE approved_intake_records SET status='superseded',superseded_at=? WHERE institution=? AND programme_id=? AND intake_year=? AND status='current'",
+                       (timestamp, session["institution"], programme_id, year))
+            db.execute("""INSERT INTO approved_intake_records(
+                institution,programme_id,intake_year,version,sanctioned_intake,supernumerary_limit,
+                approval_reference,source_reference,approval_date,status,recorded_by,recorded_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,'current',?,?)""",
+                       (session["institution"], programme_id, year, latest + 1, sanctioned_intake,
+                        supernumerary_limit, approval_reference, source_reference, approval_date,
+                        session["username"], timestamp))
+            db.commit()
+        audit("admissions.approved_intake_recorded", "approved_intake_record",
+              f"{programme['code']}:{year}:v{latest + 1}",
+              f"Recorded sanctioned intake={sanctioned_intake}, supernumerary limit={supernumerary_limit}; source={source_reference}; not independently verified.")
+        flash("Approved-intake reference recorded as a new version. The source document has not been independently verified by this application.", "success")
+    except (ValueError, TypeError, sqlite3.IntegrityError):
+        flash("Check programme, year, seat counts, approval reference, source reference, and date.", "error")
+    return redirect(url_for("admissions_monitoring"))
+
+
+@app.route("/admissions/monitoring", methods=["GET"])
+@login_required
+@role_required("institution_admin", "operator", "verifier", "auditor")
+def admissions_monitoring():
+    """Explainable, institution-scoped admissions checks; category rules are not inferred."""
+    institution = session.get("institution")
+    with connect_db() as db:
+        programmes = db.execute("SELECT id,code,name FROM programmes WHERE institution=? AND active=1 ORDER BY name", (institution,)).fetchall()
+        rows = db.execute("""SELECT a.id AS allocation_id,a.intake_year,a.capacity AS configured_capacity,
+            p.id AS programme_id,p.code AS programme_code,p.name AS programme_name,
+            air.id AS approved_intake_id,air.version AS approved_intake_version,
+            air.sanctioned_intake,air.supernumerary_limit,air.approval_reference,air.source_reference,
+            air.approval_date,air.recorded_at AS intake_recorded_at,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction')) AS active_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status='approved') AS approved_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','returned_for_correction')) AS pending_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.seat_type='supernumerary') AS supernumerary_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status='approved' AND e.seat_type='supernumerary') AS approved_supernumerary_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.student_category='unknown') AS unknown_category_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.student_category='nri') AS nri_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.student_category='oci') AS oci_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.student_category='foreign_national') AS foreign_national_count,
+            (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status IN ('submitted','under_review','approved','returned_for_correction') AND e.student_category='domestic') AS domestic_count
+            FROM intake_allocations a JOIN programmes p ON p.id=a.programme_id AND p.institution=a.institution
+            LEFT JOIN approved_intake_records air ON air.institution=a.institution AND air.programme_id=a.programme_id
+                AND air.intake_year=a.intake_year AND air.status='current'
+            WHERE a.institution=? ORDER BY a.intake_year DESC,p.name""", (institution,)).fetchall()
+        history = db.execute("""SELECT r.*,p.code AS programme_code,p.name AS programme_name
+            FROM approved_intake_records r JOIN programmes p ON p.id=r.programme_id AND p.institution=r.institution
+            WHERE r.institution=? ORDER BY r.intake_year DESC,p.name,r.version DESC LIMIT 200""", (institution,)).fetchall()
+    monitored = []
+    for row in rows:
+        item = dict(row)
+        alerts = []
+        if item["approved_intake_id"] is None:
+            alerts.append("Approved-intake reference missing")
+        else:
+            if item["approved_count"] > item["sanctioned_intake"]:
+                alerts.append("Approved intake exceeded")
+            elif item["active_count"] > item["sanctioned_intake"]:
+                alerts.append("Potential intake excess (pending records included)")
+            if item["approved_supernumerary_count"] > item["supernumerary_limit"]:
+                alerts.append("Supernumerary limit exceeded")
+            elif item["supernumerary_count"] > item["supernumerary_limit"]:
+                alerts.append("Potential supernumerary excess (pending records included)")
+        if item["unknown_category_count"]:
+            alerts.append("Category information missing")
+        item["alerts"] = alerts or ["Within recorded limits"]
+        item["alert_level"] = "alert" if any("exceeded" in x.lower() or "missing" in x.lower() for x in alerts) else ("review" if alerts else "ok")
+        monitored.append(item)
+    audit("admissions.monitoring_viewed", "admissions_monitoring", "institution", "Viewed institution-scoped explainable intake and category checks")
+    return render_template("admissions_monitoring.html", monitored=monitored, programmes=programmes,
+                           intake_history=history, can_write=session.get("role") in ("admin", "institution_admin", "operator"),
+                           current_year=datetime.now().year)
+
+
 @app.route("/admissions", methods=["GET"])
 @login_required
 @role_required("institution_admin", "operator", "verifier", "auditor")
@@ -2377,6 +3214,7 @@ def admissions_workspace():
     institution = session.get("institution")
     with connect_db() as db:
         programmes = db.execute("SELECT * FROM programmes WHERE institution=? ORDER BY name", (institution,)).fetchall()
+        students = db.execute("SELECT id,full_name,institution_student_id FROM students WHERE institution=? AND archived_at IS NULL ORDER BY full_name LIMIT 500", (institution,)).fetchall()
         allocations = db.execute("""SELECT a.*,p.code AS programme_code,p.name AS programme_name,
             (SELECT COUNT(*) FROM enrolments e WHERE e.allocation_id=a.id AND e.status NOT IN ('withdrawn','rejected')) AS enrolled
             FROM intake_allocations a JOIN programmes p ON p.id=a.programme_id
@@ -2385,7 +3223,12 @@ def admissions_workspace():
             FROM enrolments e JOIN students s ON s.id=e.student_id
             JOIN intake_allocations a ON a.id=e.allocation_id JOIN programmes p ON p.id=a.programme_id
             WHERE e.institution=? ORDER BY e.updated_at DESC,e.id DESC LIMIT 100""", (institution,)).fetchall()
-    return render_template("admissions.html", programmes=programmes, allocations=allocations, enrolments=enrolments,
+    allocations = [dict(row) for row in allocations]
+    for allocation in allocations:
+        allocation["utilization_pct"] = round((allocation["enrolled"] / allocation["capacity"]) * 100, 1) if allocation["capacity"] else 0
+        allocation["over_capacity"] = allocation["enrolled"] > allocation["capacity"]
+        allocation["remaining"] = max(0, allocation["capacity"] - allocation["enrolled"])
+    return render_template("admissions.html", programmes=programmes, students=students, allocations=allocations, enrolments=enrolments,
                            can_write=session.get("role") in ("admin", "institution_admin", "operator"), current_year=datetime.now().year)
 
 
@@ -2442,6 +3285,11 @@ def intake_create():
 @role_required("institution_admin", "operator")
 def enrolment_create():
     code = request.form.get("institutional_enrolment_id", "").strip()
+    student_category = request.form.get("student_category", "unknown").strip()
+    seat_type = request.form.get("seat_type", "regular").strip()
+    if student_category not in {"domestic", "nri", "oci", "foreign_national", "unknown"} or seat_type not in {"regular", "supernumerary"}:
+        flash("Choose a supported student category and seat type.", "error")
+        return redirect(url_for("admissions_workspace"))
     try:
         student_id = int(request.form.get("student_id", ""))
         allocation_id = int(request.form.get("allocation_id", ""))
@@ -2469,14 +3317,44 @@ def enrolment_create():
                 flash("This intake has reached its configured capacity.", "error")
                 return redirect(url_for("admissions_workspace"))
             timestamp = now()
-            db.execute("INSERT INTO enrolments(institution,student_id,allocation_id,institutional_enrolment_id,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                       (institution, student_id, allocation_id, code, session["username"], timestamp, timestamp))
+            db.execute("INSERT INTO enrolments(institution,student_id,allocation_id,institutional_enrolment_id,student_category,seat_type,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (institution, student_id, allocation_id, code, student_category, seat_type, session["username"], timestamp, timestamp))
             db.commit()
         audit("admissions.enrolment_created", "enrolment", code, "Draft enrolment created")
         flash("Draft enrolment created.", "success")
     except (ValueError, TypeError, sqlite3.IntegrityError):
         flash("Check the student, intake, enrolment ID, and existing enrolments.", "error")
     return redirect(url_for("admissions_workspace"))
+
+
+@app.route("/admissions/submissions", methods=["GET"])
+@login_required
+@role_required("institution_admin", "operator", "verifier", "auditor")
+def admissions_submission_register():
+    """Institution-scoped register of versioned admissions submissions."""
+    institution = session.get("institution")
+    status_filter = request.args.get("status", "").strip()
+    allowed_statuses = {"submitted", "under_review", "approved", "rejected", "returned_for_correction"}
+    with connect_db() as db:
+        query = """SELECT sub.id AS submission_id,sub.enrolment_id,sub.version,sub.status AS submission_status,
+            sub.submitted_by,sub.submitted_at,sub.reviewed_by,sub.reviewed_at,sub.review_note,sub.snapshot_hash,
+            e.institutional_enrolment_id,s.full_name,s.institution_student_id,p.code AS programme_code,
+            a.intake_year FROM enrolment_submissions sub
+            JOIN enrolments e ON e.id=sub.enrolment_id AND e.institution=sub.institution
+            JOIN students s ON s.id=e.student_id AND s.institution=e.institution
+            JOIN intake_allocations a ON a.id=e.allocation_id AND a.institution=e.institution
+            JOIN programmes p ON p.id=a.programme_id AND p.institution=a.institution
+            WHERE sub.institution=?"""
+        params = [institution]
+        if status_filter in allowed_statuses:
+            query += " AND sub.status=?"
+            params.append(status_filter)
+        query += " ORDER BY sub.submitted_at DESC,sub.id DESC LIMIT 250"
+        submissions = db.execute(query, params).fetchall()
+    audit("admissions.submission_register_viewed", "enrolment_submission", "register", "Viewed institution-scoped submission register")
+    return render_template("admissions_submissions.html", submissions=submissions,
+                           status_filter=status_filter if status_filter in allowed_statuses else "",
+                           statuses=sorted(allowed_statuses), current_year=datetime.now().year)
 
 
 @app.route("/admissions/enrolments/<int:enrolment_id>", methods=["GET", "POST"])
@@ -2494,7 +3372,20 @@ def enrolment_detail(enrolment_id):
             action = request.form.get("action", "")
             note = request.form.get("note", "").strip()[:1000]
             role = {"admin":"institution_admin"}.get(session.get("role"),session.get("role"))
-            if action == "submit" and role in {"institution_admin","operator"} and enrolment["status"] in {"draft","returned_for_correction"}:
+            if action == "classification" and role in {"institution_admin", "operator"} and enrolment["status"] in {"draft", "returned_for_correction"}:
+                student_category = request.form.get("student_category", "").strip()
+                seat_type = request.form.get("seat_type", "").strip()
+                if student_category not in {"domestic", "nri", "oci", "foreign_national", "unknown"} or seat_type not in {"regular", "supernumerary"}:
+                    flash("Choose a supported student category and seat type.", "error")
+                else:
+                    timestamp = now()
+                    db.execute("UPDATE enrolments SET student_category=?,seat_type=?,updated_at=? WHERE id=? AND institution=?",
+                               (student_category, seat_type, timestamp, enrolment_id, institution))
+                    db.commit()
+                    audit("admissions.classification_updated", "enrolment", enrolment_id,
+                          f"Student category={student_category}; seat type={seat_type}")
+                    flash("Admissions classification updated. This is a recorded classification, not an eligibility decision.", "success")
+            elif action == "submit" and role in {"institution_admin","operator"} and enrolment["status"] in {"draft","returned_for_correction"}:
                 # Lock before calculating the version to prevent duplicate version races.
                 db.execute("BEGIN IMMEDIATE")
                 current_status = db.execute("SELECT status FROM enrolments WHERE id=? AND institution=?", (enrolment_id, institution)).fetchone()
@@ -2515,9 +3406,27 @@ def enrolment_detail(enrolment_id):
                     flash("An effective admissions authorization covering identity, academic record, and admissions record is required before submission.", "error")
                     return redirect(url_for("enrolment_detail", enrolment_id=enrolment_id))
                 version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM enrolment_submissions WHERE enrolment_id=?", (enrolment_id,)).fetchone()[0]
+                # Freeze the submitted version so later edits to the student/intake record
+                # cannot silently rewrite what was reviewed. Exclude APAAR identifier/email.
+                snapshot_row = db.execute("""SELECT e.institution,e.institutional_enrolment_id,e.status AS enrolment_status,
+                    e.student_category,e.seat_type,s.id AS local_student_record_id,s.institution_student_id,s.full_name,s.course,s.semester,
+                    p.code AS programme_code,p.name AS programme_name,a.intake_year,a.capacity AS configured_capacity
+                    FROM enrolments e JOIN students s ON s.id=e.student_id
+                    JOIN intake_allocations a ON a.id=e.allocation_id JOIN programmes p ON p.id=a.programme_id
+                    WHERE e.id=? AND e.institution=? AND s.institution=? AND a.institution=? AND p.institution=?""",
+                    (enrolment_id,institution,institution,institution,institution)).fetchone()
+                if not snapshot_row:
+                    db.rollback()
+                    flash("The enrolment could not be safely snapshotted. No submission was created.", "error")
+                    return redirect(url_for("enrolment_detail", enrolment_id=enrolment_id))
+                snapshot = {key: snapshot_row[key] for key in snapshot_row.keys()}
+                snapshot["submitted_status"] = "submitted"
+                snapshot["snapshot_schema"] = "admissions-submission-v1"
+                snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                snapshot_hash = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
                 timestamp = now()
-                db.execute("INSERT INTO enrolment_submissions(institution,enrolment_id,version,status,submitted_by,submitted_at,authorization_id) VALUES(?,?,?,?,?,?,?)",
-                           (institution,enrolment_id,version,"submitted",session["username"],timestamp,authorization["id"]))
+                db.execute("INSERT INTO enrolment_submissions(institution,enrolment_id,version,status,submitted_by,submitted_at,authorization_id,snapshot_json,snapshot_hash) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (institution,enrolment_id,version,"submitted",session["username"],timestamp,authorization["id"],snapshot_json,snapshot_hash))
                 db.execute("UPDATE enrolments SET status='submitted',updated_at=? WHERE id=? AND institution=?", (timestamp,enrolment_id,institution))
                 db.commit()
                 audit("admissions.submitted", "enrolment", enrolment_id, f"Submission version {version}")

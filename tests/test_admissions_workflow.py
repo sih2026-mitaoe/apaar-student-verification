@@ -40,10 +40,22 @@ def test_admissions_workflow_scopes_programmes_and_enrolments_to_institution(cli
     with sqlite3.connect(app_module.DB_PATH) as db:
         status = db.execute("SELECT status FROM enrolments WHERE id=?", (enrolment_id,)).fetchone()[0]
         submission_status = db.execute("SELECT status FROM enrolment_submissions WHERE enrolment_id=?", (enrolment_id,)).fetchone()[0]
-        authorization_id = db.execute("SELECT authorization_id FROM enrolment_submissions WHERE enrolment_id=?", (enrolment_id,)).fetchone()[0]
+        authorization_id, snapshot_json, snapshot_hash = db.execute("SELECT authorization_id,snapshot_json,snapshot_hash FROM enrolment_submissions WHERE enrolment_id=?", (enrolment_id,)).fetchone()
         authorization_status = db.execute("SELECT status FROM data_use_authorizations WHERE id=?", (authorization_id,)).fetchone()[0]
     assert status == submission_status == "approved"
     assert authorization_id is not None and authorization_status == "active"
+    import hashlib, json
+    snapshot = json.loads(snapshot_json)
+    assert snapshot["institutional_enrolment_id"] == "ENR-SYN-1"
+    assert snapshot["full_name"] == "Synthetic Admissions Student"
+    assert snapshot["student_category"] == "unknown"
+    assert snapshot["seat_type"] == "regular"
+    assert "apaar_id" not in snapshot and "email" not in snapshot
+    assert snapshot_hash == hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+    register = client.get("/admissions/submissions")
+    assert register.status_code == 200
+    assert b"ENR-SYN-1" in register.data
+    assert b"Snapshot integrity" in register.data
 
 
 def test_admissions_rejects_intake_capacity_overflow(client):

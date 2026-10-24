@@ -570,3 +570,13 @@ def test_additive_schema_upgrade_creates_verified_backup_and_preserves_rows(tmp_
                 "student_updated_at_snapshot", "outcome_counts_json"}.issubset(comparison_columns)
         assert upgraded.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
+
+
+def test_shared_database_identity_reconciliation_is_disabled_by_default(client):
+    import app as app_module
+    from conftest import login_client
+
+    login_client(client)
+    app_module.app.config["ENABLE_SHARED_DEMO_RECONCILIATION"] = False
+    response = client.get("/identity-reconciliation")
+    assert response.status_code == 503
