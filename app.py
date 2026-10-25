@@ -1062,6 +1062,44 @@ def login():
         if user and check_password_hash(user["password_hash"], password):
             login_failures.pop(client_ip, None)
             email = (user["email"] or "").strip() if "email" in user.keys() else ""
+            # Temporary, explicitly enabled evaluation exception. This bypasses
+            # OTP only for one named account; password verification above remains
+            # mandatory. Remove the Render flags after the evaluation window.
+            evaluation_bypass_user = os.environ.get(
+                "EVALUATION_OTP_BYPASS_USERNAME", ""
+            ).strip()
+            evaluation_bypass_enabled = (
+                os.environ.get("EVALUATION_OTP_BYPASS", "0").strip() == "1"
+            )
+            if (
+                evaluation_bypass_enabled
+                and evaluation_bypass_user
+                and username.casefold() == evaluation_bypass_user.casefold()
+            ):
+                session.clear()
+                session["_csrf_token"] = secrets.token_urlsafe(32)
+                session["username"] = user["username"]
+                session["role"] = {"admin": "institution_admin"}.get(
+                    user["role"], user["role"]
+                )
+                session["institution"] = user["institution"]
+                session["session_version"] = (
+                    user["session_version"]
+                    if "session_version" in user.keys() else 0
+                )
+                session.permanent = True
+                audit(
+                    "login", "user", user["username"],
+                    "Temporary evaluation-mode password-only login; OTP bypass enabled",
+                )
+                app.logger.warning(
+                    "Evaluation OTP bypass used for configured account %s", username
+                )
+                flash(
+                    "Temporary evaluation access: email OTP is skipped for this account.",
+                    "warning",
+                )
+                return redirect("/")
             if not email:
                 # First-run bootstrap only: permit the seeded local administrator to enroll an email.
                 # Every subsequent sign-in requires OTP once an address is present.
