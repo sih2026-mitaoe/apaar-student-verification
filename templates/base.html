@@ -6,8 +6,29 @@
  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
  <link rel="stylesheet" href="{{ url_for('static', filename='design-system.css') }}">
+ <link rel="stylesheet" href="{{ url_for('static', filename='ui-refresh.css') }}">
+ <script src="{{ url_for('static', filename='ui-refresh.js') }}" defer></script>
 </head>
 <body>
+{% set feature_title = 'Reliable student-data management' %}
+{% set feature_body = 'This page supports SIH26263 by making student-data work more organized, reviewable and traceable. This demonstration uses synthetic records and is not an official APAAR service.' %}
+{% if request.endpoint == 'dashboard' %}{% set feature_title = 'Operational visibility' %}{% set feature_body = 'A consolidated view helps institutions prioritize incomplete records, review work and data-quality issues—the day-to-day management problem at the centre of SIH26263.' %}
+{% elif request.endpoint in ['students', 'student_form', 'student_detail'] %}{% set feature_title = 'Reliable student records' %}{% set feature_body = 'Searchable, institution-scoped records and structured fields support the SIH26263 goal of making student data easier to maintain, review and correct.' %}
+{% elif request.endpoint == 'imports' %}{% set feature_title = 'Safer bulk data handling' %}{% set feature_body = 'Previewing and validating CSV rows before confirmation supports accurate and auditable student-data management.' %}
+{% elif request.endpoint == 'source_datasets' %}{% set feature_title = 'Source traceability' %}{% set feature_body = 'Versioned institution-provided datasets let reviewers compare changes transparently without presenting those comparisons as official government verification.' %}
+{% elif request.endpoint == 'apaar_api.review_queue' %}{% set feature_title = 'Human-led review' %}{% set feature_body = 'A visible queue and recorded decisions support accountable exception handling; duplicate candidates and rule signals still require a human decision.' %}
+{% elif request.endpoint == 'audit_page' %}{% set feature_title = 'Accountability and traceability' %}{% set feature_body = 'Audit history helps authorized teams understand important data actions and supports dependable, reviewable student-data workflows.' %}
+{% elif request.endpoint == 'account_security' %}{% set feature_title = 'Protecting access to student data' %}{% set feature_body = 'Verified recovery channels and appropriate access practices help keep institution-scoped student records available only to authorized users.' %}
+{% elif request.endpoint == 'help_page' %}{% set feature_title = 'Consistent operating practice' %}{% set feature_body = 'A clear guide helps users follow the same safe workflow for data entry, review, account protection and prototype limitations.' %}
+{% elif request.endpoint == 'admissions_workspace' %}{% set feature_title = 'Structured admissions intake' %}{% set feature_body = 'Programme, capacity and enrolment records organize admissions data that institutions may need to review and prepare for downstream submissions.' %}
+{% elif request.endpoint == 'admissions_monitoring' %}{% set feature_title = 'Explainable intake checks' %}{% set feature_body = 'Comparing enrolment counts with recorded intake references surfaces items for human review without claiming regulatory findings or inventing category rules.' %}
+{% elif request.endpoint == 'admissions_submission_register' %}{% set feature_title = 'Versioned admissions decisions' %}{% set feature_body = 'Submission versions and review outcomes make the admissions workflow easier to trace, audit and correct.' %}
+{% elif request.endpoint == 'central_submission_workspace' %}{% set feature_title = 'Controlled submission preparation' %}{% set feature_body = 'A minimal, versioned snapshot and integrity check demonstrate how institutional data could be packaged for review; this prototype is not an official submission endpoint.' %}
+{% elif request.endpoint == 'central_batch_detail' %}{% set feature_title = 'Submission integrity and history' %}{% set feature_body = 'A frozen snapshot, digest and event history support reproducibility and accountability across the demonstration workflow.' %}
+{% elif request.endpoint == 'central_oversight_dashboard' %}{% set feature_title = 'Cross-institution oversight' %}{% set feature_body = 'Summary signals help platform administrators spot submitted batches that need attention while retaining clear prototype boundaries.' %}
+{% elif request.endpoint == 'central_institutions' %}{% set feature_title = 'Institution integration controls' %}{% set feature_body = 'Scoped credentials and institution records demonstrate a controlled integration model without exposing secret tokens in the interface.' %}
+{% elif request.endpoint == 'identity_reconciliation_page' %}{% set feature_title = 'Careful record reconciliation' %}{% set feature_body = 'Candidate matches can focus human review, but a similarity signal is not proof of identity and must not trigger an unreviewed merge.' %}
+{% endif %}
 <a class="skip-link" href="#main-content">Skip to main content</a>
 {% if session.get('username') %}
 <div class="shell">
@@ -37,7 +58,11 @@
  <section class="content">
  {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="flashes">{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}{% endwith %}
  {% block content %}{% endblock %}
- <footer>APAAR Student Data Platform <span>Prototype | Synthetic records only {{ current_year }}</span></footer>
+ <aside class="feature-alignment" aria-label="SIH problem statement relevance">
+   <span class="feature-alignment-mark" aria-hidden="true">SIH</span>
+   <div><strong>{{ feature_title }}</strong><p>{{ feature_body }}</p><small>SIH 2026 · SIH26263 · APAAR Student Data Management &amp; Verification Platform</small></div>
+ </aside>
+ <footer>APAAR Student Data Platform <span>Prototype · Synthetic records only · Displayed times use IST · {{ current_year }}</span></footer>
  </section>
  </main>
 </div>
@@ -45,6 +70,11 @@
 <main id="main-content" tabindex="-1">
 {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="login-flashes">{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}{% endwith %}
 {% block public_content %}{% endblock %}
+ <aside class="feature-alignment public-alignment" aria-label="SIH problem statement relevance">
+   <span class="feature-alignment-mark" aria-hidden="true">SIH</span>
+   <div><strong>{{ feature_title }}</strong><p>{{ feature_body }}</p><small>SIH 2026 · SIH26263 · APAAR Student Data Management &amp; Verification Platform</small></div>
+ </aside>
+ <footer class="public-footer">APAAR Student Data Platform <span>Prototype · Synthetic records only · {{ current_year }}</span></footer>
  </main>
 {% endif %}
 </body></html>
