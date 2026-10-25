@@ -1,38 +1,45 @@
 {% extends "base.html" %}
 {% block title %}Central submissions{% endblock %}
 {% block content %}
-<section class="page-heading">
-  <div><span class="eyebrow">INSTITUTION WORKSPACE</span><h1>Central submissions</h1>
-  <p>Create a versioned demo submission from the latest admissions records already submitted for review.</p></div>
+<div class="page-heading">
+  <div><span class="eyebrow">INSTITUTION WORKSPACE</span><h1>Central submissions</h1><p>Prepare and review versioned demo batches made from admissions submissions already recorded in this workspace.</p></div>
+  <div class="heading-actions"><a class="btn secondary" href="{{ url_for('admissions_submission_register') }}">View admissions register</a></div>
+</div>
+<div class="workflow-steps" aria-label="Central submission steps">
+  <div class="workflow-step active"><span>1</span><div><strong>Choose year</strong><small>Select eligible submissions</small></div></div>
+  <div class="workflow-step"><span>2</span><div><strong>Freeze snapshot</strong><small>Create a minimal versioned batch</small></div></div>
+  <div class="workflow-step"><span>3</span><div><strong>Check history</strong><small>Review status and integrity</small></div></div>
+</div>
+<div class="notice warning"><span class="notice-icon" aria-hidden="true">!</span><div><strong>Prototype boundary</strong><p>This is an internal synthetic-data workflow, not an official AICTE or government submission endpoint. Capacity signals use institution-recorded values, not independently verified approval records.</p></div></div>
+<section class="panel workflow-panel">
+  <div class="panel-heading"><div><h2>Prepare a batch</h2><p>Only the latest enrolment submission version in <strong>Submitted</strong> state is eligible.</p></div><span class="count-badge">{{ available_years|length }} eligible year{{ '' if available_years|length == 1 else 's' }}</span></div>
+  <div class="workflow-panel-body">
+    <p>The batch stores a minimal, frozen snapshot. APAAR-like identifiers, email addresses and free-text notes are excluded.</p>
+    <form method="post" class="form-row submission-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="academic_year">Academic year
+        <select id="academic_year" name="academic_year" required>
+          <option value="">Select academic year</option>
+          {% for year in available_years %}<option value="{{ year }}">{{ year }}–{{ year + 1 }}</option>{% endfor %}
+          {% if not available_years %}<option value="{{ current_year }}" selected>{{ current_year }}–{{ current_year + 1 }}</option>{% endif %}
+        </select>
+      </label>
+      <button class="btn primary" type="submit" {% if not available_years %}disabled{% endif %}>Create demo batch</button>
+    </form>
+    {% if not available_years %}<div class="empty-guidance"><strong>No eligible submissions yet</strong><p>Submit an enrolment version from Admissions first. Once a submission is eligible, its academic year will appear here.</p><a class="text-link" href="{{ url_for('admissions_workspace') }}">Go to Admissions &amp; intake →</a></div>{% endif %}
+  </div>
 </section>
-<div class="notice warning"><strong>Prototype boundary:</strong> this is an internal synthetic-data workflow, not an official AICTE submission endpoint. The capacity signal uses institution-configured capacity, not a verified approval record.</div>
-<section class="panel">
-  <h2>Prepare a batch</h2>
-  <p>Only the latest enrolment submission version in <strong>submitted</strong> state is eligible. The batch freezes a minimal snapshot and excludes APAAR-like identifiers, email addresses and notes.</p>
-  <form method="post" class="form-row">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label for="academic_year">Academic year
-      <select id="academic_year" name="academic_year" required>
-        <option value="">Select year</option>
-        {% for year in available_years %}<option value="{{ year }}">{{ year }}–{{ year + 1 }}</option>{% endfor %}
-        {% if not available_years %}<option value="{{ current_year }}" selected>{{ current_year }}–{{ current_year + 1 }}</option>{% endif %}
-      </select>
-    </label>
-    <button class="btn primary" type="submit" {% if not available_years %}disabled{% endif %}>Create central demo batch</button>
-  </form>
-  {% if not available_years %}<p class="muted">No eligible submitted enrolments were found. Submit admissions records for an academic year first.</p>{% endif %}
-</section>
-<section class="panel">
-  <h2>Submission history</h2>
+<section class="panel workflow-panel">
+  <div class="panel-heading"><div><h2>Submission history</h2><p>Each batch is a separate version; previously created snapshots remain available for review.</p></div><span class="count-badge">{{ batches|length }} batch{{ '' if batches|length == 1 else 'es' }}</span></div>
   {% if batches %}
-  <div class="table-wrap"><table><thead><tr><th>Batch</th><th>Academic year</th><th>Status</th><th>Records</th><th>Preliminary flags</th><th>Submitted</th><th>Snapshot integrity</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Batch reference</th><th>Academic year</th><th>Status</th><th>Records</th><th>Review flags</th><th>Submitted (IST)</th><th>Snapshot integrity</th></tr></thead><tbody>
   {% for batch in batches %}
-  <tr><td><code>{{ batch.id }}</code><br><small>Version {{ batch.version }}</small></td>
-  <td>{{ batch.academic_year }}–{{ batch.academic_year + 1 }}</td><td><span class="status-pill">{{ batch.status|replace('_',' ')|title }}</span></td>
+  <tr><td><code class="hash">{{ batch.id }}</code><small>Version {{ batch.version }}</small></td>
+  <td>{{ batch.academic_year }}–{{ batch.academic_year + 1 }}</td><td><span class="status-pill {{ 'success' if batch.integrity_ok else 'danger' }}">{{ batch.status|replace('_',' ')|title }}</span></td>
   <td>{{ batch.record_count }}</td><td>{{ batch.flagged_count }}</td><td>{{ batch.submitted_at }}</td>
-  <td>{% if batch.integrity_ok %}<span class="status-pill">Digest matches</span>{% else %}<span class="status-pill danger">Integrity check failed</span>{% endif %}</td></tr>
+  <td>{% if batch.integrity_ok %}<span class="integrity-mark good">Digest matches</span>{% else %}<span class="integrity-mark bad">Integrity check failed</span>{% endif %}</td></tr>
   {% endfor %}
   </tbody></table></div>
-  {% else %}<p>No central batches have been created by this institution yet.</p>{% endif %}
+  {% else %}<div class="empty-guidance"><strong>No batches created yet</strong><p>When an eligible batch is created, its version, record count, submission time and integrity status will be listed here.</p></div>{% endif %}
 </section>
 {% endblock %}

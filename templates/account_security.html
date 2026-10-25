@@ -1,3 +1,28 @@
-{% extends "base.html" %}{% block title %}Account security{% endblock %}{% block content %}
-<div class="page-heading"><div><span class="eyebrow">PROFILE & SECURITY</span><h1>Account security</h1><p>Verify an email address for sign-in codes and password recovery.</p></div></div>
-<div class="panel auth-settings"><p><strong>Account:</strong> {{ user.username }}</p><p><strong>Current email:</strong> {{ user.email or 'Not set' }}</p><p><strong>Email status:</strong> {{ 'Verified' if user.email_verified_at else 'Not verified' }}</p><form method="post" class="stack-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Email address<input type="email" name="email" maxlength="254" autocomplete="email" value="{{ user.email or '' }}" required></label><button class="btn primary" type="submit">Send verification code</button></form></div>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Account security{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><span class="eyebrow">PROFILE &amp; SECURITY</span><h1>Account security</h1><p>Keep the email used for sign-in codes and password recovery up to date.</p></div>
+</div>
+<div class="security-layout">
+  <section class="panel security-profile">
+    <div class="panel-heading"><div><h2>Your account</h2><p>Account details used by this workspace.</p></div><span class="status-pill {{ 'success' if user.email_verified_at else 'warning' }}">{{ 'Email verified' if user.email_verified_at else 'Verification needed' }}</span></div>
+    <div class="security-detail-list">
+      <div><span>Username</span><strong>{{ user.username }}</strong></div>
+      <div><span>Current email</span><strong class="security-email">{{ user.email or 'No email added yet' }}</strong></div>
+      <div><span>Email verification</span><strong>{{ 'Verified' if user.email_verified_at else 'Not verified' }}</strong><small>{{ 'Your email can be used for supported recovery flows.' if user.email_verified_at else 'Verify your email before relying on email-based recovery.' }}</small></div>
+    </div>
+  </section>
+  <section class="panel security-form-panel">
+    <div class="panel-heading"><div><h2>Verify or update email</h2><p>We will send a verification code to the address entered below.</p></div></div>
+    <form method="post" class="security-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="security-email">Email address</label>
+      <input id="security-email" type="email" name="email" maxlength="254" autocomplete="email" value="{{ user.email or '' }}" placeholder="you@institution.edu" required>
+      <p class="field-help">Use an inbox you can access now. Never share verification codes with another person.</p>
+      <button class="btn primary" type="submit">Send verification code</button>
+    </form>
+  </section>
+</div>
+<div class="notice security-notice"><span class="notice-icon" aria-hidden="true">i</span><div><strong>Security reminder</strong><p>Use a unique password, sign out from shared devices, and contact your institution administrator if you suspect an account has been accessed improperly.</p></div></div>
+{% endblock %}
